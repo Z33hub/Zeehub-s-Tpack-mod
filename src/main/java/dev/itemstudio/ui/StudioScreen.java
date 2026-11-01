@@ -25,7 +25,6 @@ import net.minecraft.world.item.Items;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
-import net.minecraft.network.chat.FontDescription;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.Util;
@@ -56,8 +55,6 @@ public final class StudioScreen extends Screen {
 	private static final int GOOD = 0xFF5BE49B;
 	private static final int GOLD = 0xFFF5B83D;
 
-	private static final FontDescription.Resource POPPINS = new FontDescription.Resource(Identifier.fromNamespaceAndPath(ItemStudioClient.MOD_ID, "poppins"));
-	private static final FontDescription.Resource POPPINS_BOLD = new FontDescription.Resource(Identifier.fromNamespaceAndPath(ItemStudioClient.MOD_ID, "poppins_semibold"));
 
 	private static final int HEADER = 24;
 	private static final int FOOTER = 26;
@@ -199,13 +196,10 @@ public final class StudioScreen extends Screen {
 		ItemInfo.clearCache();
 	}
 
-	// ------------------------------------------------------------------ text with the menu font
+	// ------------------------------------------------------------------ text (Minecraft font)
 
 	private MutableComponent styled(String s, boolean bold) {
-		if (config.minecraftFont) {
-			return bold ? Component.literal(s).setStyle(Style.EMPTY.withBold(true)) : Component.literal(s);
-		}
-		return Component.literal(s).setStyle(Style.EMPTY.withFont(bold ? POPPINS_BOLD : POPPINS));
+		return bold ? Component.literal(s).setStyle(Style.EMPTY.withBold(true)) : Component.literal(s);
 	}
 
 	private int textW(String s) {
@@ -470,7 +464,7 @@ public final class StudioScreen extends Screen {
 
 		// settings and close
 		int gx = px + pw - 40, cx = px + pw - 21;
-		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme, opacity, font", mouseX, mouseY,
+		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme and opacity", mouseX, mouseY,
 			settingsOpen, () -> settingsOpen = !settingsOpen);
 		drawGear(ctx, gx + 4, py + 8, settingsOpen ? 0xFFFFFFFF : TEXT2);
 		iconButton(ctx, cx, py + 4, "Close (changes are applied)", mouseX, mouseY, false, this::onClose);
@@ -1123,23 +1117,6 @@ public final class StudioScreen extends Screen {
 			}, ix1, ix2, y, mouseX, mouseY, 100f);
 		y += 4;
 
-		text(ctx, "Text font", ix1, y, TEXT2);
-		y += 12;
-		String[] fonts = {"Poppins", "Minecraft"};
-		for (int i = 0; i < 2; i++) {
-			int fx = ix1 + i * (tw + gap);
-			boolean on = config.minecraftFont == (i == 1);
-			boolean hover = inside(mouseX, mouseY, fx, y, fx + tw, y + 15);
-			roundRect(ctx, fx, y, fx + tw, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-			outline(ctx, fx, y, fx + tw, y + 15, on ? pal.accent() : pal.surfaceBorder());
-			text(ctx, fonts[i], fx + (tw - textW(fonts[i])) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
-			final boolean mc = i == 1;
-			hits.add(new Hit(fx, y, fx + tw, y + 15, () -> {
-				config.minecraftFont = mc;
-				config.save();
-			}, null, null, null));
-		}
-		y += 24;
 		small(ctx, "Menu key: Right Shift.", ix1, y, MUTED);
 		small(ctx, "Change it in Options > Controls.", ix1, y + 8, MUTED);
 		y += 24;
