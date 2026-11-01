@@ -42,7 +42,7 @@ public final class ItemStudioClient implements ClientModInitializer {
 		// Small button in the top-left corner of the pause menu.
 		ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
 			if (screen instanceof PauseScreen) {
-				Screens.getButtons(screen).add(Button.builder(Component.literal("Item Studio"),
+				Screens.getWidgets(screen).add(Button.builder(Component.literal("Item Studio"),
 						b -> Minecraft.getInstance().gui.setScreen(new StudioScreen(screen)))
 					.bounds(6, 6, 80, 20)
 					.build());
