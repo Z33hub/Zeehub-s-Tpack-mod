@@ -81,6 +81,10 @@ public final class StudioScreen extends Screen {
 	private final Map<String, Integer> scroll = new HashMap<>();
 
 	private PackIndex index;
+	/** Packs are read on a background thread so opening the menu never freezes the game. */
+	private java.util.concurrent.CompletableFuture<PackIndex> loading;
+	private String searchCacheQuery;
+	private List<Item> searchCache = List.of();
 	private Category category = Category.SWORDS;
 	private Item selected;
 	private Tab tab = Tab.STYLES;
@@ -105,11 +109,8 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	protected void init() {
-		if (index == null) {
-			index = PackIndex.scan();
-			int count = index.packs().size();
-			setStatus(count == 0 ? "No packs found. Put PvP packs in your resourcepacks folder."
-				: "Found " + count + " pack" + (count == 1 ? "" : "s"), count == 0 ? WARN : MUTED);
+		if (index == null && loading == null) {
+			startScan("Loading packs...");
 		}
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 
@@ -154,9 +155,45 @@ public final class StudioScreen extends Screen {
 	@Override
 	public void removed() {
 		previews.clear();
-		if (index != null) index.close();
+		if (index != null) {
+			index.close();
+		} else if (loading != null) {
+			loading.thenAccept(PackIndex::close); // close it once the background scan finishes
+		}
 		index = null;
+		loading = null;
 		ItemInfo.clearCache();
+	}
+
+	private void startScan(String message) {
+		setStatus(message, MUTED);
+		loading = java.util.concurrent.CompletableFuture.supplyAsync(PackIndex::scan);
+	}
+
+	/** Picks up the background scan when it has finished. Returns true once packs are ready. */
+	private boolean ready() {
+		if (index != null) return true;
+		if (loading == null || !loading.isDone()) return false;
+		try {
+			index = loading.join();
+			int count = index.packs().size();
+			setStatus(count == 0 ? "No packs found. Put PvP packs in your resourcepacks folder."
+				: "Found " + count + " pack" + (count == 1 ? "" : "s"), count == 0 ? WARN : MUTED);
+		} catch (Exception e) {
+			dev.itemstudio.ItemStudioClient.LOG.error("Pack scan failed", e);
+			setStatus("Could not read your packs - see the game log", WARN);
+			loading = null;
+			return false;
+		}
+		return true;
+	}
+
+	/** For actions that can't wait: finishes the scan now if it is still running. */
+	private PackIndex indexNow() {
+		if (index == null) {
+			index = loading != null ? loading.join() : PackIndex.scan();
+		}
+		return index;
 	}
 
 	// ------------------------------------------------------------------ actions
@@ -180,7 +217,7 @@ public final class StudioScreen extends Screen {
 	private void apply() {
 		config.cleanUp();
 		config.save();
-		PackBuilder builder = new PackBuilder(config, index).build();
+		PackBuilder builder = new PackBuilder(config, indexNow()).build();
 		if (!PackWriter.write(builder.files())) {
 			setStatus("Could not write the pack - see the game log", WARN);
 			return;
@@ -195,11 +232,12 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void rescan() {
+		if (index == null) return; // a scan is already running
 		previews.clear();
-		if (index != null) index.close();
+		index.close();
+		index = null;
 		ItemInfo.clearCache();
-		index = PackIndex.scan();
-		setStatus("Rescanned: " + index.packs().size() + " pack(s)", MUTED);
+		startScan("Rescanning packs...");
 	}
 
 	private void setStyle(Item item, String sourceId) {
@@ -241,12 +279,15 @@ public final class StudioScreen extends Screen {
 
 	private List<Item> gridItems() {
 		if (query.isEmpty()) return category.items();
+		if (query.equals(searchCacheQuery)) return searchCache; // only search again when the text changes
 		List<Item> list = new ArrayList<>();
 		for (Item item : Category.ALL.items()) {
 			String id = Registries.ITEM.getId(item).getPath();
 			String name = item.getName().getString().toLowerCase(Locale.ROOT);
 			if (id.contains(query.replace(' ', '_')) || name.contains(query)) list.add(item);
 		}
+		searchCacheQuery = query;
+		searchCache = list;
 		return list;
 	}
 
@@ -402,6 +443,10 @@ public final class StudioScreen extends Screen {
 		roundRect(ctx, x1, y1, x2, y2, SIDE);
 		if (selected == null) {
 			ctx.drawText(textRenderer, "Pick an item", x1 + 8, y1 + 8, MUTED, false);
+			return;
+		}
+		if (!ready()) {
+			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
 			return;
 		}
 		ItemInfo info = ItemInfo.of(selected);
@@ -688,6 +733,10 @@ public final class StudioScreen extends Screen {
 	private void drawBulk(DrawContext ctx, int mouseX, int mouseY) {
 		int x1 = detailX, y1 = bodyY + 2, x2 = detailX + detailW, y2 = footerY - 2;
 		roundRect(ctx, x1, y1, x2, y2, SIDE);
+		if (!ready()) {
+			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
+			return;
+		}
 		ctx.drawText(textRenderer, textRenderer.trimToWidth("One pack for all " + category.label, detailW - 12), x1 + 8, y1 + 8, TEXT, false);
 		ctx.drawText(textRenderer, textRenderer.trimToWidth("Click a pack to use it for every", detailW - 12), x1 + 8, y1 + 20, MUTED, false);
 		ctx.drawText(textRenderer, textRenderer.trimToWidth("item in this group that it has.", detailW - 12), x1 + 8, y1 + 30, MUTED, false);
