@@ -28,6 +28,17 @@ public final class StudioConfig {
 	public Map<String, Map<String, Adjust>> adjust = new TreeMap<>();
 	public boolean applyInstantly = false;
 
+	// Look of the menu
+	public String theme = "PURPLE";
+	public float opacity = 0.78f;
+	public boolean minecraftFont = false;
+
+	// Style browsing
+	public java.util.Set<String> favorites = new java.util.TreeSet<>();
+	/** Most recently picked packs first. */
+	public java.util.List<String> recent = new java.util.ArrayList<>();
+	public boolean sortZtoA = false;
+
 	public static StudioConfig get() {
 		if (instance == null) {
 			instance = load();
@@ -68,6 +79,14 @@ public final class StudioConfig {
 		} catch (IOException e) {
 			ItemStudioClient.LOG.warn("Could not save {}", path, e);
 		}
+	}
+
+	/** Remembers a pack as recently used (newest first, at most 30). */
+	public void markRecent(String sourceId) {
+		if (sourceId == null) return;
+		recent.remove(sourceId);
+		recent.add(0, sourceId);
+		while (recent.size() > 30) recent.remove(recent.size() - 1);
 	}
 
 	public Adjust getAdjust(String itemId, View view) {

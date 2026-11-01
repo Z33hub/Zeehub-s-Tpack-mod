@@ -1,6 +1,7 @@
 package dev.itemstudio.ui;
 
 import dev.itemstudio.Adjust;
+import dev.itemstudio.ItemStudioClient;
 import dev.itemstudio.StudioConfig;
 import dev.itemstudio.View;
 import dev.itemstudio.build.PackBuilder;
@@ -9,6 +10,7 @@ import dev.itemstudio.pack.FilePackSource;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
+import dev.itemstudio.pack.Refs;
 import dev.itemstudio.pack.Resources;
 import dev.itemstudio.pack.VanillaSource;
 import net.minecraft.client.gl.RenderPipelines;
@@ -19,40 +21,50 @@ import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.input.KeyInput;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
+import net.minecraft.text.MutableText;
+import net.minecraft.text.Style;
+import net.minecraft.text.StyleSpriteSource;
 import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.Util;
 import org.joml.Matrix3x2fStack;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * The Item Studio menu. Everything except the search box is drawn by hand so it can look clean and custom:
- * each frame registers its clickable areas in {@link #hits}, and clicks are matched against them.
+ * The Item Studio menu: categories on the left, the items of a category as a row of tiles, a large gallery of
+ * style cards, and a preview + size/position panel on the right. Everything except the two search boxes is drawn
+ * by hand; each frame registers its clickable areas in {@link #hits}, and clicks are matched against them.
  */
 public final class StudioScreen extends Screen {
-	// Colours (ARGB)
-	private static final int PANEL = 0xF0101320;
-	private static final int SIDE = 0xFF151927;
-	private static final int CARD = 0xFF1C2033;
-	private static final int CARD_HOVER = 0xFF262B44;
-	private static final int LINE = 0xFF2B3150;
-	private static final int ACCENT = 0xFF8B6CFF;
-	private static final int ACCENT_SOFT = 0x408B6CFF;
+	// Text colours (the backgrounds come from the theme)
 	private static final int TEXT = 0xFFF2F3F8;
-	private static final int MUTED = 0xFF8D93AB;
+	private static final int TEXT2 = 0xFFC4C8D8;
+	private static final int MUTED = 0xFF9AA0B8;
+	private static final int WARN = 0xFFF5B83D;
 	private static final int GOOD = 0xFF5BE49B;
-	private static final int WARN = 0xFFFFC857;
+	private static final int GOLD = 0xFFF5B83D;
 
-	private enum Tab { STYLES, ADJUST }
+	private static final StyleSpriteSource.Font POPPINS = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins"));
+	private static final StyleSpriteSource.Font POPPINS_BOLD = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins_semibold"));
 
-	private record Hit(int x1, int y1, int x2, int y2, Runnable action, String tooltip, Slider slider) {
+	private static final int HEADER = 24;
+	private static final int FOOTER = 26;
+
+	private enum Filter { ALL, FAVORITES, RECENT }
+
+	private record Hit(int x1, int y1, int x2, int y2, Runnable action, Runnable rightAction, String tooltip, Slider slider) {
 		boolean contains(double x, double y) {
 			return x >= x1 && x < x2 && y >= y1 && y < y2;
 		}
@@ -61,7 +73,7 @@ public final class StudioScreen extends Screen {
 	private record ScrollArea(String key, int x1, int y1, int x2, int y2, int max) {
 	}
 
-	/** A draggable value row on the Size & Position tab. */
+	/** A draggable value row. */
 	private record Slider(String label, float min, float max, float step, float defaultValue,
 	                      Supplier<Float> get, Consumer<Float> set, int barX1, int barX2) {
 		void setFromMouse(double mouseX) {
@@ -72,6 +84,14 @@ public final class StudioScreen extends Screen {
 		}
 	}
 
+	/**
+	 * One style card. sourceId is what gets saved when it is clicked; ids lists every source that looks exactly
+	 * the same, so identical packs show as one card.
+	 */
+	private record Card(String sourceId, List<String> ids, String name, String sub, String tooltip,
+	                    Supplier<byte[]> image, String imageKey) {
+	}
+
 	private final Screen parent;
 	private final StudioConfig config = StudioConfig.get();
 	private final PreviewTextures previews = new PreviewTextures();
@@ -79,33 +99,31 @@ public final class StudioScreen extends Screen {
 	private final List<Hit> hits = new ArrayList<>();
 	private final List<ScrollArea> scrollAreas = new ArrayList<>();
 	private final Map<String, Integer> scroll = new HashMap<>();
+	private static final com.google.gson.Gson SNAPSHOT_GSON = new com.google.gson.Gson();
 
 	private PackIndex index;
-	/** Packs are read on a background thread so opening the menu never freezes the game. */
-	private java.util.concurrent.CompletableFuture<PackIndex> loading;
-	private String searchCacheQuery;
-	private List<Item> searchCache = List.of();
+	private CompletableFuture<PackIndex> loading;
 	private Category category = Category.SWORDS;
 	private Item selected;
-	private Tab tab = Tab.STYLES;
 	private View view = View.FIRST_PERSON;
+	private Filter filter = Filter.ALL;
 	private boolean bulkMode;
+	private boolean settingsOpen;
 	private String query = "";
-	/** Number of items that differ from what was last applied. */
+	private String styleQuery = "";
+	private String searchCacheQuery;
+	private List<Item> searchCache = List.of();
 	private int pending;
-	/** Item id -> its saved choices at the last apply, to work out what is still waiting. */
 	private Map<String, String> applied;
-	private static final com.google.gson.Gson SNAPSHOT_GSON = new com.google.gson.Gson();
 	private String status = "";
 	private int statusColor = MUTED;
 	private Slider dragging;
 	private TextFieldWidget search;
-	/** Filters the style cards by pack name. */
 	private TextFieldWidget styleSearch;
-	private String styleQuery = "";
+	private Theme.Palette pal;
 
 	// layout
-	private int px, py, pw, ph, bodyY, bodyH, sideW, gridX, gridW, detailX, detailW, footerY;
+	private int px, py, pw, ph, bodyY, footerY, railW, sideX, sideW, centerX, centerW;
 
 	public StudioScreen(Screen parent) {
 		super(Text.translatable("itemstudio.title"));
@@ -116,9 +134,7 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	protected void init() {
-		if (index == null && loading == null) {
-			startScan("Loading packs...");
-		}
+		if (index == null && loading == null) startScan("Loading packs...");
 		if (applied == null) applied = snapshot();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 
@@ -126,38 +142,36 @@ public final class StudioScreen extends Screen {
 		py = 6;
 		pw = width - 12;
 		ph = height - 12;
-		bodyY = py + 24;
-		footerY = py + ph - 22;
-		bodyH = footerY - bodyY;
-		sideW = width >= 600 ? 110 : 26;
-		detailW = Math.max(156, Math.min(240, (int) ((pw - sideW) * 0.46)));
-		detailX = px + pw - detailW - 4;
-		gridX = px + sideW + 8;
-		gridW = detailX - gridX - 6;
+		bodyY = py + HEADER;
+		footerY = py + ph - FOOTER;
+		railW = width >= 520 ? 100 : 24;
+		sideW = Math.max(140, Math.min(180, (int) (pw * 0.28)));
+		sideX = px + pw - sideW;
+		centerX = px + railW + 10;
+		centerW = sideX - centerX - 10;
 
-		int searchW = Math.min(150, Math.max(70, pw / 4));
-		search = new TextFieldWidget(textRenderer, px + pw - searchW - 26, py + 8, searchW - 8, 10, Text.literal("Search"));
+		int searchW = Math.max(70, Math.min(150, pw / 4));
+		search = new TextFieldWidget(textRenderer, px + pw - searchW - 44, py + 8, searchW - 18, 10, Text.literal("Search all items"));
 		search.setDrawsBackground(false);
 		search.setMaxLength(50);
 		search.setText(query);
-		search.setPlaceholder(Text.literal("Search all items"));
+		search.setPlaceholder(styled("Search all items", false).withColor(MUTED));
 		search.setChangedListener(text -> {
 			query = text.trim().toLowerCase(Locale.ROOT);
-			scroll.put("grid", 0);
+			scroll.put("items", 0);
 			bulkMode = false;
 		});
 		addDrawableChild(search);
 
-		styleSearch = new TextFieldWidget(textRenderer, detailX + 10, bodyY + 74, detailW - 24, 10, Text.literal("Search packs"));
+		styleSearch = new TextFieldWidget(textRenderer, centerX + 16, bodyY, 100, 10, Text.literal("Search packs"));
 		styleSearch.setDrawsBackground(false);
 		styleSearch.setMaxLength(50);
 		styleSearch.setText(styleQuery);
-		styleSearch.setPlaceholder(Text.literal("Search packs"));
+		styleSearch.setPlaceholder(styled("Search packs", false).withColor(MUTED));
 		styleSearch.setChangedListener(text -> {
 			styleQuery = text.trim().toLowerCase(Locale.ROOT);
-			scroll.put("detail", 0);
+			scroll.put("cards", 0);
 		});
-		styleSearch.visible = false;
 		addDrawableChild(styleSearch);
 	}
 
@@ -178,29 +192,81 @@ public final class StudioScreen extends Screen {
 		if (index != null) {
 			index.close();
 		} else if (loading != null) {
-			loading.thenAccept(PackIndex::close); // close it once the background scan finishes
+			loading.thenAccept(PackIndex::close);
 		}
 		index = null;
 		loading = null;
 		ItemInfo.clearCache();
 	}
 
-	private void startScan(String message) {
-		setStatus(message, MUTED);
-		loading = java.util.concurrent.CompletableFuture.supplyAsync(PackIndex::scan);
+	// ------------------------------------------------------------------ text with the menu font
+
+	private MutableText styled(String s, boolean bold) {
+		if (config.minecraftFont) {
+			return bold ? Text.literal(s).setStyle(Style.EMPTY.withBold(true)) : Text.literal(s);
+		}
+		return Text.literal(s).setStyle(Style.EMPTY.withFont(bold ? POPPINS_BOLD : POPPINS));
 	}
 
-	/** Picks up the background scan when it has finished. Returns true once packs are ready. */
+	private int textW(String s) {
+		return textRenderer.getWidth(styled(s, false));
+	}
+
+	private int boldW(String s) {
+		return textRenderer.getWidth(styled(s, true));
+	}
+
+	private String trim(String s, int max) {
+		if (textW(s) <= max) return s;
+		String dots = "...";
+		int end = s.length();
+		while (end > 0 && textW(s.substring(0, end) + dots) > max) end--;
+		return s.substring(0, end).trim() + dots;
+	}
+
+	private void text(DrawContext ctx, String s, int x, int y, int color) {
+		ctx.drawText(textRenderer, styled(s, false), x, y, color, false);
+	}
+
+	private void bold(DrawContext ctx, String s, int x, int y, int color) {
+		ctx.drawText(textRenderer, styled(s, true), x, y, color, false);
+	}
+
+	/** Smaller text (75%) for hints and sub-labels. */
+	private void small(DrawContext ctx, String s, int x, int y, int color) {
+		Matrix3x2fStack m = ctx.getMatrices();
+		m.pushMatrix();
+		m.translate(x, y);
+		m.scale(0.75f, 0.75f);
+		ctx.drawText(textRenderer, styled(s, false), 0, 0, color, false);
+		m.popMatrix();
+	}
+
+	private int smallW(String s) {
+		return Math.round(textW(s) * 0.75f);
+	}
+
+	private String smallTrim(String s, int max) {
+		return trim(s, Math.round(max / 0.75f));
+	}
+
+	// ------------------------------------------------------------------ packs / state
+
+	private void startScan(String message) {
+		setStatus(message, MUTED);
+		loading = CompletableFuture.supplyAsync(PackIndex::scan);
+	}
+
 	private boolean ready() {
 		if (index != null) return true;
 		if (loading == null || !loading.isDone()) return false;
 		try {
 			index = loading.join();
 			int count = index.packs().size();
-			setStatus(count == 0 ? "No packs found. Put PvP packs in your resourcepacks folder."
-				: "Found " + count + " pack" + (count == 1 ? "" : "s"), count == 0 ? WARN : MUTED);
+			setStatus(count == 0 ? "No packs found - put PvP packs in your resourcepacks folder"
+				: "Ready", count == 0 ? WARN : MUTED);
 		} catch (Exception e) {
-			dev.itemstudio.ItemStudioClient.LOG.error("Pack scan failed", e);
+			ItemStudioClient.LOG.error("Pack scan failed", e);
 			setStatus("Could not read your packs - see the game log", WARN);
 			loading = null;
 			return false;
@@ -208,22 +274,16 @@ public final class StudioScreen extends Screen {
 		return true;
 	}
 
-	/** For actions that can't wait: finishes the scan now if it is still running. */
 	private PackIndex indexNow() {
-		if (index == null) {
-			index = loading != null ? loading.join() : PackIndex.scan();
-		}
+		if (index == null) index = loading != null ? loading.join() : PackIndex.scan();
 		return index;
 	}
-
-	// ------------------------------------------------------------------ actions
 
 	private void setStatus(String text, int color) {
 		status = text;
 		statusColor = color;
 	}
 
-	/** Each item's current choices (style + size/position) as text, so two states can be compared. */
 	private Map<String, String> snapshot() {
 		config.cleanUp();
 		Map<String, String> map = new HashMap<>();
@@ -235,14 +295,14 @@ public final class StudioScreen extends Screen {
 		return map;
 	}
 
-	/** Counts items whose choices differ from the last apply. Picking A, then B, then C for one item is 1. */
+	/** Items whose choices differ from the last apply. Picking A, then B, then C for one item is 1. */
 	private int countPending() {
 		Map<String, String> now = snapshot();
 		java.util.Set<String> ids = new java.util.HashSet<>(now.keySet());
 		ids.addAll(applied.keySet());
 		int count = 0;
 		for (String id : ids) {
-			if (!java.util.Objects.equals(now.get(id), applied.get(id))) count++;
+			if (!Objects.equals(now.get(id), applied.get(id))) count++;
 		}
 		return count;
 	}
@@ -256,7 +316,7 @@ public final class StudioScreen extends Screen {
 		} else if (finished && config.applyInstantly) {
 			apply();
 		} else {
-			setStatus(pending + " item" + (pending == 1 ? "" : "s") + " changed - press Apply", WARN);
+			setStatus(pending + " item" + (pending == 1 ? "" : "s") + " changed", WARN);
 		}
 	}
 
@@ -279,7 +339,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void rescan() {
-		if (index == null) return; // a scan is already running
+		if (index == null) return;
 		previews.clear();
 		index.close();
 		index = null;
@@ -290,7 +350,10 @@ public final class StudioScreen extends Screen {
 	private void setStyle(Item item, String sourceId) {
 		String id = Registries.ITEM.getId(item).toString();
 		if (sourceId == null) config.styles.remove(id);
-		else config.styles.put(id, sourceId);
+		else {
+			config.styles.put(id, sourceId);
+			if (!VanillaSource.ID.equals(sourceId)) config.markRecent(sourceId);
+		}
 	}
 
 	private String styleOf(Item item) {
@@ -298,23 +361,31 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void useForCategory(String sourceId) {
-		int count = 0;
 		for (Item item : category.items()) {
 			if (sourceId == null) {
-				if (styleOf(item) != null) {
-					setStyle(item, null);
-					count++;
-				}
+				setStyle(item, null);
 				continue;
 			}
 			PackSource source = index.get(sourceId);
 			if (source == null) continue;
 			if (source instanceof VanillaSource || index.provided(source, ItemInfo.of(item)).any()) {
 				setStyle(item, sourceId);
-				count++;
 			}
 		}
 		changed(true);
+	}
+
+	private void toggleFavorite(List<String> ids) {
+		if (ids.isEmpty() || VanillaSource.ID.equals(ids.get(0))) return;
+		boolean fav = isFavorite(ids);
+		if (fav) ids.forEach(config.favorites::remove);
+		else config.favorites.add(ids.get(0));
+		config.save();
+	}
+
+	private boolean isFavorite(List<String> ids) {
+		for (String id : ids) if (config.favorites.contains(id)) return true;
+		return false;
 	}
 
 	private ItemStack stack(Item item) {
@@ -323,7 +394,7 @@ public final class StudioScreen extends Screen {
 
 	private List<Item> gridItems() {
 		if (query.isEmpty()) return category.items();
-		if (query.equals(searchCacheQuery)) return searchCache; // only search again when the text changes
+		if (query.equals(searchCacheQuery)) return searchCache;
 		List<Item> list = new ArrayList<>();
 		for (Item item : Category.ALL.items()) {
 			String id = Registries.ITEM.getId(item).getPath();
@@ -335,28 +406,31 @@ public final class StudioScreen extends Screen {
 		return list;
 	}
 
+	private Theme theme() {
+		return Theme.byName(config.theme);
+	}
+
 	// ------------------------------------------------------------------ rendering
 
 	@Override
 	public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
 		hits.clear();
 		scrollAreas.clear();
+		pal = theme().palette(config.opacity);
+		ready();
 
-		roundRect(ctx, px, py, px + pw, py + ph, PANEL);
-		outline(ctx, px, py, px + pw, py + ph, LINE);
+		roundRect(ctx, px, py, px + pw, py + ph, pal.panel());
+		outline(ctx, px, py, px + pw, py + ph, pal.panelBorder());
 
 		drawHeader(ctx, mouseX, mouseY);
-		drawSidebar(ctx, mouseX, mouseY);
-		drawGrid(ctx, mouseX, mouseY);
-		styleSearch.visible = false; // shown again below if the current panel has it
-		if (bulkMode && query.isEmpty() && category != Category.ALL) {
-			drawBulk(ctx, mouseX, mouseY);
-		} else {
-			drawDetail(ctx, mouseX, mouseY);
-		}
+		drawRail(ctx, mouseX, mouseY);
+		styleSearch.visible = false;
+		drawCenter(ctx, mouseX, mouseY);
+		if (settingsOpen) drawSettings(ctx, mouseX, mouseY);
+		else drawSide(ctx, mouseX, mouseY);
 		drawFooter(ctx, mouseX, mouseY);
 
-		super.render(ctx, mouseX, mouseY, delta); // the search box
+		super.render(ctx, mouseX, mouseY, delta); // the two search boxes
 
 		for (int i = hits.size() - 1; i >= 0; i--) {
 			Hit hit = hits.get(i);
@@ -368,169 +442,229 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void drawHeader(DrawContext ctx, int mouseX, int mouseY) {
-		fill(ctx, px + 10, py + 8, px + 13, py + 17, ACCENT);
-		ctx.drawText(textRenderer, "Item Studio", px + 18, py + 9, TEXT, false);
-		int titleW = textRenderer.getWidth("Item Studio");
-		if (pw > 360) {
-			ctx.drawText(textRenderer, "pick a look for every item", px + 26 + titleW, py + 9, MUTED, false);
+		int x = px + 8, y = py + 5;
+		roundRect(ctx, x, y, x + 14, y + 14, pal.strong());
+		Matrix3x2fStack m = ctx.getMatrices();
+		m.pushMatrix();
+		m.translate(x + 2, y + 2);
+		m.scale(0.625f, 0.625f);
+		ctx.drawItem(stack(Items.DIAMOND_SWORD), 0, 0);
+		m.popMatrix();
+		bold(ctx, "Item Studio", x + 20, py + 8, TEXT);
+
+		int crumbX = x + 26 + boldW("Item Studio");
+		fill(ctx, crumbX, py + 7, crumbX + 1, py + 17, pal.line2());
+		String where = !query.isEmpty() ? "Search" : category.label;
+		String item = selected == null ? "" : selected.getName().getString();
+		int roomEnd = search.getX() - 12;
+		if (roomEnd - crumbX > 60) {
+			String crumb = trim(where + "  /  " + item, roomEnd - crumbX - 8);
+			text(ctx, crumb, crumbX + 8, py + 8, MUTED);
 		}
 
 		// search box frame
-		int sx1 = search.getX() - 5, sy1 = search.getY() - 4, sx2 = search.getX() + search.getWidth() + 3, sy2 = search.getY() + 12;
-		roundRect(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? CARD_HOVER : CARD);
-		outline(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? ACCENT : LINE);
+		int sx1 = search.getX() - 16, sy1 = py + 4, sx2 = search.getX() + search.getWidth() + 4, sy2 = py + 20;
+		roundRect(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? pal.surfaceHover() : pal.surface());
+		outline(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? pal.accent() : pal.surfaceBorder());
+		drawSearchIcon(ctx, sx1 + 5, sy1 + 4, MUTED);
 
-		// close button
-		int cx = px + pw - 20, cy = py + 5;
-		boolean hover = inside(mouseX, mouseY, cx, cy, cx + 15, cy + 15);
-		roundRect(ctx, cx, cy, cx + 15, cy + 15, hover ? 0xFF3A2030 : CARD);
-		ctx.drawText(textRenderer, "x", cx + 5, cy + 3, hover ? 0xFFFF7A90 : MUTED, false);
-		hits.add(new Hit(cx, cy, cx + 15, cy + 15, this::close, "Close (changes are applied)", null));
+		// settings and close
+		int gx = px + pw - 40, cx = px + pw - 21;
+		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme, opacity, font", mouseX, mouseY,
+			settingsOpen, () -> settingsOpen = !settingsOpen);
+		drawGear(ctx, gx + 4, py + 8, settingsOpen ? 0xFFFFFFFF : TEXT2);
+		iconButton(ctx, cx, py + 4, "Close (changes are applied)", mouseX, mouseY, false, this::close);
+		drawCross(ctx, cx + 5, py + 9, TEXT2);
 
-		fill(ctx, px + 1, bodyY - 2, px + pw - 1, bodyY - 1, LINE);
+		fill(ctx, px + 1, bodyY - 1, px + pw - 1, bodyY, pal.line());
 	}
 
-	private void drawSidebar(DrawContext ctx, int mouseX, int mouseY) {
-		int x1 = px + 4, y1 = bodyY + 2, x2 = px + 4 + sideW, y2 = footerY - 2;
-		roundRect(ctx, x1, y1, x2, y2, SIDE);
+	private void drawRail(DrawContext ctx, int mouseX, int mouseY) {
+		int x1 = px + 1, y1 = bodyY, x2 = px + railW, y2 = footerY;
+		fill(ctx, x1, y1, x2, y2, pal.rail());
+		fill(ctx, x2, y1, x2 + 1, y2, pal.line());
 		Category[] cats = Category.values();
-		int rowH = 20;
-		int content = cats.length * rowH + 4;
-		int off = scrollOf("side", content, y2 - y1);
-		scrollAreas.add(new ScrollArea("side", x1, y1, x2, y2, Math.max(0, content - (y2 - y1))));
+		int rowH = 18;
+		int top = y1 + 6;
+		if (railW > 40) {
+			small(ctx, "CATEGORIES", x1 + 10, top, MUTED);
+			top += 10;
+		}
+		int content = cats.length * (rowH + 1);
+		int off = scrollOf("rail", content, y2 - top - 4);
+		scrollAreas.add(new ScrollArea("rail", x1, top, x2, y2, Math.max(0, content - (y2 - top - 4))));
 
-		ctx.enableScissor(x1, y1, x2, y2);
-		int y = y1 + 2 - off;
+		ctx.enableScissor(x1, top, x2, y2);
+		int y = top - off;
 		for (Category cat : cats) {
 			boolean active = cat == category && query.isEmpty();
-			boolean hover = inside(mouseX, mouseY, x1, Math.max(y, y1), x2, Math.min(y + rowH, y2));
-			if (active) {
-				fill(ctx, x1 + 2, y, x2 - 2, y + rowH - 1, ACCENT_SOFT);
-				fill(ctx, x1 + 2, y + 3, x1 + 4, y + rowH - 4, ACCENT);
-			} else if (hover) {
-				fill(ctx, x1 + 2, y, x2 - 2, y + rowH - 1, CARD_HOVER);
-			}
-			ctx.drawItem(stack(cat.icon), x1 + 5, y + 2);
-			if (sideW > 40) {
-				ctx.drawText(textRenderer, textRenderer.trimToWidth(cat.label, sideW - 30), x1 + 25, y + 6,
-					active ? TEXT : MUTED, false);
+			boolean hover = inside(mouseX, mouseY, x1, Math.max(y, top), x2, Math.min(y + rowH, y2));
+			int bx1 = x1 + 5, bx2 = x2 - 5;
+			if (active) roundRect(ctx, bx1, y, bx2, y + rowH, pal.soft());
+			else if (hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
+			Matrix3x2fStack m = ctx.getMatrices();
+			m.pushMatrix();
+			m.translate(bx1 + 3, y + 3);
+			m.scale(0.75f, 0.75f);
+			ctx.drawItem(stack(cat.icon), 0, 0);
+			m.popMatrix();
+			if (railW > 40) {
+				String count = cat == Category.ALL ? "" : String.valueOf(cat.items().size());
+				int countW = smallW(count);
+				text(ctx, trim(cat.label, bx2 - bx1 - 24 - countW), bx1 + 18, y + 5, active ? 0xFFFFFFFF : TEXT2);
+				small(ctx, count, bx2 - 4 - countW, y + 6, active ? pal.accentText() : MUTED);
 			}
 			final Category target = cat;
-			addHit(x1, y, x2, y + rowH, y1, y2, () -> {
+			addHit(bx1, y, bx2, y + rowH, top, y2, () -> {
 				category = target;
 				query = "";
 				search.setText("");
 				bulkMode = false;
-				scroll.put("grid", 0);
+				scroll.put("items", 0);
+				scroll.put("cards", 0);
 				if (!target.items().isEmpty()) selected = target.items().get(0);
-			}, sideW > 40 ? null : cat.label);
-			y += rowH;
+			}, railW > 40 ? null : cat.label);
+			y += rowH + 1;
 		}
 		ctx.disableScissor();
 	}
 
-	private void drawGrid(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawCenter(DrawContext ctx, int mouseX, int mouseY) {
 		List<Item> items = gridItems();
 		boolean searching = !query.isEmpty();
-		String title = searching ? "Search: " + items.size() + " found" : category.label;
-		ctx.drawText(textRenderer, title, gridX, bodyY + 6, TEXT, false);
-		if (!searching) {
-			ctx.drawText(textRenderer, items.size() + " items", gridX + textRenderer.getWidth(title) + 6, bodyY + 6, MUTED, false);
-		}
+		int x = centerX, w = centerW;
+		int y = bodyY + 8;
 
+		// title row
+		String title = searching ? "Search" : category.label;
+		bold(ctx, title, x, y + 3, TEXT);
+		text(ctx, items.size() + " item" + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
 		if (!searching && category != Category.ALL) {
-			String label = bulkMode ? "Back to item" : "One pack for all";
-			int bw = textRenderer.getWidth(label) + 12;
-			button(ctx, gridX + gridW - bw, bodyY + 2, bw, 15, label, bulkMode, mouseX, mouseY, () -> {
+			String label = bulkMode ? "Back to " + (selected == null ? "item" : trim(selected.getName().getString(), 60))
+				: "One pack for all";
+			int bw = textW(label) + 14;
+			button(ctx, x + w - bw, y, bw, 15, label, bulkMode, false, mouseX, mouseY, () -> {
 				bulkMode = !bulkMode;
-				scroll.put("detail", 0);
-			}, "Use one pack for every " + category.label.toLowerCase(Locale.ROOT) + " item it has");
+				scroll.put("cards", 0);
+			}, bulkMode ? null : "Use one pack for every " + category.label.toLowerCase(Locale.ROOT) + " item it has");
 		}
+		y += 20;
 
-		int top = bodyY + 22, bottom = footerY - 2;
-		int cell = 24;
-		int cols = Math.max(1, gridW / cell);
-		int rows = (items.size() + cols - 1) / cols;
-		int content = rows * cell;
-		int off = scrollOf("grid", content, bottom - top);
-		scrollAreas.add(new ScrollArea("grid", gridX, top, gridX + gridW, bottom, Math.max(0, content - (bottom - top))));
-
+		// item tiles: up to 2 rows, scrolls when there are more
+		int tile = 22, gap = 4;
+		int cols = Math.max(1, (w + gap) / (tile + gap));
+		int rows = Math.max(1, (items.size() + cols - 1) / cols);
+		int shownRows = Math.min(rows, 2);
+		int areaH = shownRows * (tile + gap) - gap;
+		int content = rows * (tile + gap) - gap;
+		int off = scrollOf("items", content, areaH);
+		scrollAreas.add(new ScrollArea("items", x, y, x + w, y + areaH, Math.max(0, content - areaH)));
 		if (items.isEmpty()) {
-			ctx.drawText(textRenderer, "Nothing matches", gridX, top + 4, MUTED, false);
-			return;
-		}
-		ctx.enableScissor(gridX, top, gridX + gridW, bottom);
-		for (int i = 0; i < items.size(); i++) {
-			int x = gridX + (i % cols) * cell;
-			int y = top + (i / cols) * cell - off;
-			if (y + cell < top || y > bottom) continue;
-			Item item = items.get(i);
-			boolean isSelected = item == selected && !bulkMode;
-			boolean hover = inside(mouseX, mouseY, x, Math.max(y, top), x + cell - 2, Math.min(y + cell - 2, bottom));
-			roundRect(ctx, x, y, x + cell - 2, y + cell - 2, hover ? CARD_HOVER : CARD);
-			if (isSelected) outline(ctx, x, y, x + cell - 2, y + cell - 2, ACCENT);
-			ctx.drawItem(stack(item), x + 3, y + 3);
-			String id = Registries.ITEM.getId(item).toString();
-			if (config.styles.containsKey(id) || config.hasAdjust(id)) {
-				fill(ctx, x + cell - 6, y + 2, x + cell - 4, y + 4, ACCENT);
-			}
-			addHit(x, y, x + cell - 2, y + cell - 2, top, bottom, () -> {
-				selected = item;
-				bulkMode = false;
-				scroll.put("detail", 0);
-			}, item.getName().getString());
-		}
-		ctx.disableScissor();
-	}
-
-	private void drawDetail(DrawContext ctx, int mouseX, int mouseY) {
-		int x1 = detailX, y1 = bodyY + 2, x2 = detailX + detailW, y2 = footerY - 2;
-		roundRect(ctx, x1, y1, x2, y2, SIDE);
-		if (selected == null) {
-			ctx.drawText(textRenderer, "Pick an item", x1 + 8, y1 + 8, MUTED, false);
-			return;
-		}
-		if (!ready()) {
-			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
-			return;
-		}
-		ItemInfo info = ItemInfo.of(selected);
-
-		// big icon + name
-		roundRect(ctx, x1 + 6, y1 + 6, x1 + 42, y1 + 42, CARD);
-		Matrix3x2fStack m = ctx.getMatrices();
-		m.pushMatrix();
-		m.translate(x1 + 8, y1 + 8);
-		m.scale(2f, 2f);
-		ctx.drawItem(stack(selected), 0, 0);
-		m.popMatrix();
-		int textW = detailW - 54;
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(selected.getName().getString(), textW), x1 + 48, y1 + 10, TEXT, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(info.id, textW), x1 + 48, y1 + 22, MUTED, false);
-		String style = styleOf(selected);
-		String styleName = style == null ? "Default" : index.get(style) == null ? style + " (missing)" : index.get(style).displayName();
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(styleName, textW), x1 + 48, y1 + 32, style == null ? MUTED : ACCENT, false);
-
-		// tabs
-		int ty = y1 + 48;
-		int half = (detailW - 16) / 2;
-		tabButton(ctx, x1 + 6, ty, half, "Styles", tab == Tab.STYLES, mouseX, mouseY, () -> tab = Tab.STYLES);
-		tabButton(ctx, x1 + 10 + half, ty, half, "Size & Position", tab == Tab.ADJUST, mouseX, mouseY, () -> tab = Tab.ADJUST);
-
-		int top = ty + 20;
-		if (tab == Tab.STYLES) {
-			drawStyles(ctx, info, x1, top, x2, y2, mouseX, mouseY);
+			text(ctx, "Nothing matches", x, y + 6, MUTED);
 		} else {
-			drawAdjust(ctx, info, x1, top, x2, y2, mouseX, mouseY);
+			ctx.enableScissor(x, y, x + w, y + areaH);
+			for (int i = 0; i < items.size(); i++) {
+				int tx = x + (i % cols) * (tile + gap);
+				int ty = y + (i / cols) * (tile + gap) - off;
+				if (ty + tile < y || ty > y + areaH) continue;
+				Item item = items.get(i);
+				boolean isSelected = item == selected;
+				boolean hover = inside(mouseX, mouseY, tx, Math.max(ty, y), tx + tile, Math.min(ty + tile, y + areaH));
+				roundRect(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
+				ctx.drawItem(stack(item), tx + 3, ty + 3);
+				String id = Registries.ITEM.getId(item).toString();
+				if (config.styles.containsKey(id) || config.hasAdjust(id)) {
+					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
+				}
+				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
+					selected = item;
+					bulkMode = false;
+					settingsOpen = false;
+					scroll.put("cards", 0);
+					scroll.put("side", 0);
+				}, item.getName().getString());
+			}
+			ctx.disableScissor();
+		}
+		y += areaH + 8;
+
+		// toolbar: pack search, filter, sort
+		int sortW = textW(config.sortZtoA ? "Name Z-A" : "Name A-Z") + 14;
+		String[] filterNames = {"All", "Favorites", "Recent"};
+		int segW = 6;
+		for (String f : filterNames) segW += textW(f) + 12;
+		int searchW = Math.max(60, w - sortW - segW - 12);
+		int sx1 = x, sx2 = x + searchW;
+		roundRect(ctx, sx1, y, sx2, y + 16, styleSearch.isFocused() ? pal.surfaceHover() : pal.surface());
+		outline(ctx, sx1, y, sx2, y + 16, styleSearch.isFocused() ? pal.accent() : pal.surfaceBorder());
+		drawSearchIcon(ctx, sx1 + 5, y + 4, MUTED);
+		styleSearch.visible = true;
+		styleSearch.setX(sx1 + 16);
+		styleSearch.setY(y + 4);
+		styleSearch.setWidth(searchW - 20);
+
+		int fx = sx2 + 6;
+		roundRect(ctx, fx, y, fx + segW, y + 16, pal.surface());
+		outline(ctx, fx, y, fx + segW, y + 16, pal.surfaceBorder());
+		int cx = fx + 3;
+		for (int i = 0; i < filterNames.length; i++) {
+			String f = filterNames[i];
+			int fw = textW(f) + 10;
+			boolean on = filter.ordinal() == i;
+			boolean hover = inside(mouseX, mouseY, cx, y + 2, cx + fw, y + 14);
+			if (on) roundRect(ctx, cx, y + 2, cx + fw, y + 14, pal.soft());
+			else if (hover) roundRect(ctx, cx, y + 2, cx + fw, y + 14, pal.surface());
+			text(ctx, f, cx + 5, y + 4, on ? 0xFFFFFFFF : MUTED);
+			final Filter target = Filter.values()[i];
+			hits.add(new Hit(cx, y + 2, cx + fw, y + 14, () -> {
+				filter = target;
+				scroll.put("cards", 0);
+			}, null, null, null));
+			cx += fw + 2;
+		}
+		button(ctx, x + w - sortW, y, sortW, 16, config.sortZtoA ? "Name Z-A" : "Name A-Z", false, false, mouseX, mouseY, () -> {
+			config.sortZtoA = !config.sortZtoA;
+			config.save();
+		}, "Change the order of the packs");
+		y += 22;
+
+		if (!ready()) {
+			text(ctx, "Loading packs...", x, y + 4, MUTED);
+			return;
+		}
+		if (bulkMode && !searching && category != Category.ALL) {
+			drawBulk(ctx, x, y, w, footerY - 6, mouseX, mouseY);
+		} else if (selected != null) {
+			drawCards(ctx, ItemInfo.of(selected), x, y, w, footerY - 6, mouseX, mouseY);
 		}
 	}
 
-	/**
-	 * One style card. sourceId is what gets saved when it is clicked; ids lists every source that looks exactly
-	 * the same, so identical packs show as one card.
-	 */
-	private record Card(String sourceId, List<String> ids, String name, String tooltip, Supplier<byte[]> image,
-	                    String imageKey) {
+	/** Sorts pack groups by name and applies the favorites / recent filter and the pack search. */
+	private <T> List<T> arrange(List<T> groups, java.util.function.Function<T, List<FilePackSource>> packsOf) {
+		List<T> list = new ArrayList<>();
+		for (T g : groups) {
+			List<FilePackSource> packs = packsOf.apply(g);
+			List<String> ids = new ArrayList<>();
+			StringBuilder names = new StringBuilder();
+			for (FilePackSource p : packs) {
+				ids.add(p.id());
+				names.append(p.displayName().toLowerCase(Locale.ROOT)).append(' ');
+			}
+			if (!styleQuery.isEmpty() && !names.toString().contains(styleQuery)) continue;
+			if (filter == Filter.FAVORITES && !isFavorite(ids)) continue;
+			if (filter == Filter.RECENT && ids.stream().noneMatch(config.recent::contains)) continue;
+			list.add(g);
+		}
+		if (filter == Filter.RECENT) {
+			list.sort(java.util.Comparator.comparingInt(g -> packsOf.apply(g).stream()
+				.mapToInt(p -> config.recent.indexOf(p.id())).filter(i -> i >= 0).min().orElse(999)));
+		} else {
+			java.util.Comparator<T> byName = java.util.Comparator.comparing(
+				g -> packsOf.apply(g).get(0).displayName().toLowerCase(Locale.ROOT));
+			list.sort(config.sortZtoA ? byName.reversed() : byName);
+		}
+		return list;
 	}
 
 	private static String names(List<FilePackSource> packs) {
@@ -542,34 +676,33 @@ public final class StudioScreen extends Screen {
 		return b.toString();
 	}
 
-	private void drawStyles(DrawContext ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
-		List<Card> cards = new ArrayList<>();
+	private void drawCards(DrawContext ctx, ItemInfo info, int x, int top, int w, int bottom, int mouseX, int mouseY) {
 		String main = info.mainTexture;
 		String current = styleOf(selected);
 		List<FilePackSource> packs = index.packsFor(info);
 
-		// Packs whose files are exactly what the game already shows fold into "Default".
+		// Packs whose files are exactly what the game already shows fold into "Default";
+		// packs with identical files for this item become one card.
 		List<FilePackSource> likeDefault = new ArrayList<>();
-		Map<String, List<FilePackSource>> groups = new java.util.LinkedHashMap<>();
+		Map<String, List<FilePackSource>> groups = new LinkedHashMap<>();
 		for (FilePackSource pack : packs) {
-			if (!pack.id().equals(current) && index.sameAsBelow(pack, info)) {
-				likeDefault.add(pack);
-			} else {
-				groups.computeIfAbsent(index.fingerprint(pack, info), k -> new ArrayList<>()).add(pack);
-			}
+			if (!pack.id().equals(current) && index.sameAsBelow(pack, info)) likeDefault.add(pack);
+			else groups.computeIfAbsent(index.fingerprint(pack, info), k -> new ArrayList<>()).add(pack);
 		}
 
-		String defaultTip = "Don't change this item (keeps whatever your other packs do)"
-			+ (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault));
-		cards.add(new Card(null, List.of(), "Default", defaultTip,
-			() -> main == null ? null : Resources.readBelow(main), "below|" + main));
-		// Vanilla is only worth showing when something else changes the item.
-		if (!index.belowIsVanilla(info) || VanillaSource.ID.equals(current)) {
-			cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla",
-				"The normal Minecraft look, even if another pack changes it",
-				() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
+		List<Card> cards = new ArrayList<>();
+		boolean showFixed = styleQuery.isEmpty() && filter == Filter.ALL;
+		if (showFixed) {
+			cards.add(new Card(null, List.of(), "Default", "What the game shows now",
+				"Don't change this item" + (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault)),
+				() -> main == null ? null : Resources.readBelow(main), "below|" + main));
+			if (!index.belowIsVanilla(info) || VanillaSource.ID.equals(current)) {
+				cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look",
+					"The normal Minecraft look, even if another pack changes it",
+					() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
+			}
 		}
-		for (List<FilePackSource> group : groups.values()) {
+		for (List<FilePackSource> group : arrange(new ArrayList<>(groups.values()), g -> g)) {
 			FilePackSource shown = group.get(0);
 			List<String> ids = new ArrayList<>();
 			for (FilePackSource pack : group) {
@@ -577,79 +710,504 @@ public final class StudioScreen extends Screen {
 				if (pack.id().equals(current)) shown = pack;
 			}
 			final FilePackSource preview = shown;
-			String name = group.size() == 1 ? shown.displayName() : shown.displayName() + " +" + (group.size() - 1);
-			String tip = group.size() == 1 ? shown.displayName()
-				: "Same look in " + group.size() + " packs: " + names(group);
-			cards.add(new Card(shown.id(), ids, name, tip, () -> previewBytes(preview, info), shown.id() + "|" + info.id));
+			PackIndex.Provided provided = index.provided(shown, info);
+			boolean model = provided.itemDef() || !provided.models().isEmpty() || !provided.parentModels().isEmpty();
+			boolean tex = !provided.textures().isEmpty();
+			String sub = group.size() > 1 ? "Same look in " + group.size() + " packs"
+				: model && tex ? "Texture + model" : model ? "Model" : "Texture";
+			String tip = group.size() == 1 ? shown.displayName() : "Same look in: " + names(group);
+			cards.add(new Card(shown.id(), ids, shown.displayName(), sub, tip + " - right-click to favorite",
+				() -> previewBytes(preview, info), shown.id() + "|" + info.id));
 		}
 
-		top = drawStyleSearch(ctx, x1, top, x2);
-		cards = filterCards(cards);
-		boolean noMatch = cards.isEmpty();
-
-		int hintH = 0;
-		if (packs.isEmpty() || noMatch) {
-			hintH = 22;
-		} else if (info.hasWornLook()) {
-			hintH = 12;
-		}
-
-		int innerW = x2 - x1 - 12;
-		int cols = Math.max(2, innerW / 58);
-		int gap = 4;
-		int cardW = (innerW - gap * (cols - 1)) / cols;
-		int cardH = cardW + 12;
+		int gap = 6;
+		int cols = Math.max(2, (w + gap) / (58 + gap));
+		int cardW = (w - gap * (cols - 1)) / cols;
+		int prev = cardW - 8;
+		int cardH = 4 + prev + 4 + 9 + 9 + 8 + 2;
 		int rows = (cards.size() + cols - 1) / cols;
+		int hintH = cards.isEmpty() || packs.isEmpty() ? 26 : info.hasWornLook() ? 12 : 0;
 		int content = rows * (cardH + gap) + hintH;
-		int bottom = y2 - 4;
-		int off = scrollOf("detail", content, bottom - top);
-		scrollAreas.add(new ScrollArea("detail", x1, top, x2, bottom, Math.max(0, content - (bottom - top))));
+		int off = scrollOf("cards", content, bottom - top);
+		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
 
-		ctx.enableScissor(x1, top, x2, bottom);
+		ctx.enableScissor(x, top, x + w, bottom);
 		for (int i = 0; i < cards.size(); i++) {
 			Card card = cards.get(i);
-			int cx = x1 + 6 + (i % cols) * (cardW + gap);
+			int cx = x + (i % cols) * (cardW + gap);
 			int cy = top + (i / cols) * (cardH + gap) - off;
 			if (cy + cardH < top || cy > bottom) continue;
 			boolean on = current == null ? card.sourceId == null : card.ids.contains(current);
 			boolean hover = inside(mouseX, mouseY, cx, Math.max(cy, top), cx + cardW, Math.min(cy + cardH, bottom));
-			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, hover ? CARD_HOVER : CARD);
-			if (on) outline(ctx, cx, cy, cx + cardW, cy + cardH, ACCENT);
-
-			int size = cardW - 8;
-			if (!drawPreview(ctx, card.imageKey, card.image, cx + 4, cy + 4, size)) {
+			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, on ? pal.cardOn() : hover ? pal.surfaceHover() : pal.surface());
+			if (on) {
+				outline(ctx, cx, cy, cx + cardW, cy + cardH, pal.accent());
+				outline(ctx, cx + 1, cy + 1, cx + cardW - 1, cy + cardH - 1, pal.accent());
+			}
+			roundRect(ctx, cx + 4, cy + 4, cx + 4 + prev, cy + 4 + prev, pal.well());
+			int img = prev - 10;
+			if (!drawPreview(ctx, card.imageKey, card.image, cx + 9, cy + 9, img)) {
 				Matrix3x2fStack m = ctx.getMatrices();
 				m.pushMatrix();
-				float scale = size / 16f;
-				m.translate(cx + 4, cy + 4);
+				float scale = img / 16f;
+				m.translate(cx + 9, cy + 9);
 				m.scale(scale, scale);
 				ctx.drawItem(stack(selected), 0, 0);
 				m.popMatrix();
 			}
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1,
-				on ? TEXT : MUTED, false);
+			// name on up to two lines, then the kind of change
+			String[] lines = twoLines(card.name, cardW - 8);
+			int ny = cy + 4 + prev + 4;
+			text(ctx, lines[0], cx + 4, ny, TEXT);
+			if (!lines[1].isEmpty()) text(ctx, lines[1], cx + 4, ny + 9, TEXT);
+			small(ctx, smallTrim(card.sub, cardW - 8), cx + 4, ny + (lines[1].isEmpty() ? 10 : 19), MUTED);
+
+			boolean fav = card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && isFavorite(card.ids);
 			if (on) {
-				fill(ctx, cx + cardW - 9, cy + 3, cx + cardW - 3, cy + 9, ACCENT);
+				roundRect(ctx, cx + cardW - 15, cy + 6, cx + cardW - 6, cy + 15, pal.strong());
+				drawCheck(ctx, cx + cardW - 13, cy + 8, 0xFFFFFFFF);
 			}
+			final List<String> ids = card.ids;
 			final String sourceId = card.sourceId;
 			final boolean alreadyOn = on;
+			Runnable favToggle = () -> toggleFavorite(ids);
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
 				if (alreadyOn) return;
 				setStyle(selected, sourceId);
 				changed(true);
-			}, card.tooltip);
+			}, favToggle, card.tooltip);
+			if (card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && (fav || hover)) {
+				drawStar(ctx, cx + 7, cy + 7, fav ? GOLD : 0x99FFFFFF);
+				addHit(cx + 5, cy + 5, cx + 15, cy + 15, top, bottom, favToggle, favToggle,
+					fav ? "Remove from favorites" : "Add to favorites");
+			}
 		}
 		int hy = top + rows * (cardH + gap) - off + 2;
-		if (noMatch) {
-			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
+		if (cards.isEmpty()) {
+			text(ctx, styleQuery.isEmpty() ? "No packs here yet." : "No packs match \"" + styleQuery + "\"", x, hy, MUTED);
+			if (filter == Filter.FAVORITES) small(ctx, "Right-click a style card to add it to favorites.", x, hy + 11, MUTED);
 		} else if (packs.isEmpty()) {
-			ctx.drawText(textRenderer, "None of your packs change this item.", x1 + 6, hy, MUTED, false);
-			ctx.drawText(textRenderer, "Add packs and press Rescan.", x1 + 6, hy + 10, MUTED, false);
+			text(ctx, "None of your packs change this item.", x, hy, MUTED);
+			small(ctx, "Add packs to your resourcepacks folder and press Rescan.", x, hy + 11, MUTED);
 		} else if (info.hasWornLook()) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth("Also changes how it looks when worn/used", innerW), x1 + 6, hy, MUTED, false);
+			small(ctx, "Packs here also change how it looks when worn or used.", x, hy, MUTED);
 		}
 		ctx.disableScissor();
 	}
+
+	/** Splits a name into two lines that fit, ending the second with "..." if needed. */
+	private String[] twoLines(String s, int max) {
+		if (textW(s) <= max) return new String[]{s, ""};
+		String[] words = s.split(" ");
+		StringBuilder first = new StringBuilder();
+		int i = 0;
+		while (i < words.length) {
+			String next = first.length() == 0 ? words[i] : first + " " + words[i];
+			if (textW(next) > max) break;
+			first.setLength(0);
+			first.append(next);
+			i++;
+		}
+		if (first.length() == 0) {
+			// one long word: cut it
+			String a = trim(s, max);
+			String cut = a.endsWith("...") ? a.substring(0, a.length() - 3) : a;
+			return new String[]{cut, trim(s.substring(cut.length()), max)};
+		}
+		StringBuilder rest = new StringBuilder();
+		for (; i < words.length; i++) {
+			if (rest.length() > 0) rest.append(' ');
+			rest.append(words[i]);
+		}
+		return new String[]{first.toString(), trim(rest.toString(), max)};
+	}
+
+	/** One pack for all: a row per pack showing which items of the group it changes. */
+	private void drawBulk(DrawContext ctx, int x, int top, int w, int bottom, int mouseX, int mouseY) {
+		List<Item> items = category.items();
+		Map<String, List<FilePackSource>> groups = new LinkedHashMap<>();
+		Map<String, int[]> counts = new HashMap<>();
+		for (FilePackSource pack : index.packs()) {
+			int count = 0;
+			StringBuilder look = new StringBuilder();
+			for (Item item : items) {
+				ItemInfo info = ItemInfo.of(item);
+				if (index.provided(pack, info).any()) {
+					count++;
+					look.append(info.id).append('=').append(index.fingerprint(pack, info)).append(';');
+				}
+			}
+			if (count == 0) continue;
+			counts.put(pack.id(), new int[]{count});
+			groups.computeIfAbsent(look.toString(), k -> new ArrayList<>()).add(pack);
+		}
+		List<List<FilePackSource>> rows = arrange(new ArrayList<>(groups.values()), g -> g);
+
+		int rowH = 34, gap = 5;
+		int content = rows.size() * (rowH + gap) + 22;
+		int off = scrollOf("cards", content, bottom - top);
+		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
+
+		ctx.enableScissor(x, top, x + w, bottom);
+		int y = top - off;
+		// reset row
+		boolean anyStyled = items.stream().anyMatch(i -> styleOf(i) != null);
+		String reset = "Reset all " + category.label.toLowerCase(Locale.ROOT) + " to Default";
+		if (anyStyled) {
+			int rw = textW(reset) + 14;
+			if (y + 15 > top && y < bottom) {
+				button(ctx, x + w - rw, y, rw, 15, reset, false, false, mouseX, mouseY, () -> useForCategory(null), null);
+			}
+		}
+		small(ctx, "Faded tiles = that pack doesn't change this item.", x, y + 5, MUTED);
+		y += 22;
+
+		int tile = 20;
+		int buttonW = 74;
+		for (List<FilePackSource> group : rows) {
+			if (y + rowH < top || y > bottom) {
+				y += rowH + gap;
+				continue;
+			}
+			FilePackSource pack = group.get(0);
+			int count = counts.get(pack.id())[0];
+			boolean inUse = true;
+			for (Item item : items) {
+				if (index.provided(pack, ItemInfo.of(item)).any()) {
+					String s = styleOf(item);
+					if (s == null || group.stream().noneMatch(p -> p.id().equals(s))) {
+						inUse = false;
+						break;
+					}
+				}
+			}
+			roundRect(ctx, x, y, x + w, y + rowH, inUse ? pal.cardOn() : pal.surface());
+			if (inUse) outline(ctx, x, y, x + w, y + rowH, pal.accent());
+
+			int nameW = Math.max(70, w / 3);
+			bold(ctx, trim(pack.displayName() + (group.size() > 1 ? " +" + (group.size() - 1) : ""), nameW - 10), x + 8, y + 7, TEXT);
+			String sub = (inUse ? "In use - " : "") + "Changes " + count + " of " + items.size();
+			small(ctx, smallTrim(sub, nameW - 10), x + 8, y + 19, inUse ? pal.accentText() : MUTED);
+
+			int tx = x + nameW;
+			int tilesEnd = x + w - buttonW - 10;
+			int fit = Math.max(0, (tilesEnd - tx + 3) / (tile + 3));
+			for (int k = 0; k < items.size() && k < fit; k++) {
+				Item item = items.get(k);
+				ItemInfo info = ItemInfo.of(item);
+				boolean has = index.provided(pack, info).any();
+				int ty = y + 7;
+				int ox = tx + k * (tile + 3);
+				if (k == fit - 1 && items.size() > fit) {
+					roundRect(ctx, ox, ty, ox + tile, ty + tile, pal.surface());
+					String more = "+" + (items.size() - fit + 1);
+					small(ctx, more, ox + (tile - smallW(more)) / 2, ty + 7, MUTED);
+					break;
+				}
+				roundRect(ctx, ox, ty, ox + tile, ty + tile, has ? pal.well() : pal.surface());
+				if (has) {
+					if (!drawPreview(ctx, pack.id() + "|" + info.id, () -> previewBytes(pack, info), ox + 2, ty + 2, tile - 4)) {
+						ctx.drawItem(stack(item), ox + 2, ty + 2);
+					}
+				} else {
+					Matrix3x2fStack m = ctx.getMatrices();
+					m.pushMatrix();
+					m.translate(ox + 4, ty + 4);
+					m.scale(0.75f, 0.75f);
+					ctx.drawItem(stack(item), 0, 0);
+					m.popMatrix();
+					fill(ctx, ox, ty, ox + tile, ty + tile, 0x99000000 | (theme().base & 0xFFFFFF));
+				}
+				addHit(ox, ty, ox + tile, ty + tile, top, bottom, null, null,
+					item.getName().getString() + (has ? "" : " (not in this pack)"));
+			}
+
+			String label = inUse ? "In use" : "Use for " + count;
+			if (y + 9 >= top && y + 25 <= bottom) {
+				button(ctx, x + w - buttonW - 6, y + 9, buttonW, 16, label, !inUse, inUse, mouseX, mouseY,
+					inUse ? () -> { } : () -> useForCategory(pack.id()),
+					inUse ? null : "Use " + pack.displayName() + " for the " + count + " item(s) it changes");
+			}
+			y += rowH + gap;
+		}
+		if (rows.isEmpty()) {
+			text(ctx, styleQuery.isEmpty() ? "None of your packs change items in this group." : "No packs match \"" + styleQuery + "\"",
+				x, y + 2, MUTED);
+		}
+		ctx.disableScissor();
+	}
+
+	private void drawSide(DrawContext ctx, int mouseX, int mouseY) {
+		int x1 = sideX, x2 = px + pw - 1, top = bodyY, bottom = footerY;
+		fill(ctx, x1, top, x2, bottom, pal.rail());
+		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
+		if (selected == null) {
+			text(ctx, "Pick an item", x1 + 10, top + 10, MUTED);
+			return;
+		}
+		ItemInfo info = ItemInfo.of(selected);
+		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
+
+		int content = 400;
+		int off = scrollOf("side", content, bottom - top);
+		ctx.enableScissor(x1, top, x2, bottom);
+		int y = top + 8 - off;
+
+		// preview stage: the chosen style's texture, big
+		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
+		outline(ctx, ix1, y, ix2, y + 56, pal.line());
+		String style = ready() ? styleOf(selected) : null;
+		boolean drawn = false;
+		if (ready() && style != null && index.get(style) != null) {
+			PackSource src = index.get(style);
+			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewBytes(src, info), ix1 + iw / 2 - 20, y + 8, 40);
+		}
+		if (!drawn) {
+			Matrix3x2fStack m = ctx.getMatrices();
+			m.pushMatrix();
+			m.translate(ix1 + iw / 2 - 20, y + 8);
+			m.scale(2.5f, 2.5f);
+			ctx.drawItem(stack(selected), 0, 0);
+			m.popMatrix();
+		}
+		small(ctx, "Preview", ix1 + 5, y + 49, MUTED);
+		y += 62;
+
+		bold(ctx, trim(selected.getName().getString(), iw), ix1, y, TEXT);
+		y += 11;
+		small(ctx, smallTrim(info.id, iw), ix1, y, MUTED);
+		y += 9;
+		text(ctx, "Style", ix1, y + 2, MUTED);
+		String styleName = style == null ? "Default" : index != null && index.get(style) != null ? index.get(style).displayName() : style + " (missing)";
+		int chipX = ix1 + textW("Style") + 6;
+		String chip = trim(styleName, ix2 - chipX - 10);
+		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
+		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
+		y += 18;
+		fill(ctx, ix1, y, ix2, y + 1, pal.line());
+		y += 7;
+
+		bold(ctx, "Size & position", ix1, y, TEXT);
+		String resetLabel = "Reset";
+		int rw = textW(resetLabel);
+		boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
+		text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
+		String itemId = info.id;
+		hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+			Adjust a = config.getAdjust(itemId, view);
+			if (a != null && !a.isDefault()) {
+				a.reset();
+				changed(true);
+			}
+		}, null, "Reset this view", null));
+		y += 14;
+
+		// view buttons, 3 per row
+		View[] views = View.values();
+		int vgap = 3;
+		int vw = (iw - vgap * 2) / 3;
+		for (int i = 0; i < views.length; i++) {
+			View v = views[i];
+			int vx = ix1 + (i % 3) * (vw + vgap);
+			int vy = y + (i / 3) * 16;
+			boolean on = v == view;
+			Adjust adj = config.getAdjust(itemId, v);
+			boolean edited = adj != null && !adj.isDefault();
+			boolean hover = inside(mouseX, mouseY, vx, vy, vx + vw, vy + 13);
+			roundRect(ctx, vx, vy, vx + vw, vy + 13, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
+			if (!on) outline(ctx, vx, vy, vx + vw, vy + 13, pal.surfaceBorder());
+			String l = smallTrim(v.label, vw - 4);
+			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + 4, on ? 0xFFFFFFFF : edited ? pal.accentText() : TEXT2);
+			final View target = v;
+			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null, null, null));
+		}
+		y += 2 * 16 + 4;
+
+		Adjust current = config.getAdjust(itemId, view);
+		Adjust shown = current == null ? new Adjust() : current;
+		y = slider(ctx, "Size", "%", 0.1f, 3f, 0.05f, 1f, () -> shown.scale,
+			v -> config.editAdjust(itemId, view).scale = v, ix1, ix2, y, mouseX, mouseY, 100f);
+		y = slider(ctx, "Left / right", "", -16f, 16f, 0.25f, 0f, () -> shown.x,
+			v -> config.editAdjust(itemId, view).x = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = slider(ctx, "Up / down", "", -16f, 16f, 0.25f, 0f, () -> shown.y,
+			v -> config.editAdjust(itemId, view).y = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = slider(ctx, "Forward / back", "", -16f, 16f, 0.25f, 0f, () -> shown.z,
+			v -> config.editAdjust(itemId, view).z = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = slider(ctx, "Tilt", "°", -180f, 180f, 5f, 0f, () -> shown.rotX,
+			v -> config.editAdjust(itemId, view).rotX = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = slider(ctx, "Turn", "°", -180f, 180f, 5f, 0f, () -> shown.rotY,
+			v -> config.editAdjust(itemId, view).rotY = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = slider(ctx, "Roll", "°", -180f, 180f, 5f, 0f, () -> shown.rotZ,
+			v -> config.editAdjust(itemId, view).rotZ = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y += 2;
+		String resetAll = "Reset all views";
+		boolean raHover = inside(mouseX, mouseY, ix1, y - 2, ix1 + textW(resetAll), y + 10);
+		text(ctx, resetAll, ix1, y, raHover ? 0xFFFFFFFF : pal.accentText());
+		hits.add(new Hit(ix1, y - 2, ix1 + textW(resetAll), y + 10, () -> {
+			if (config.hasAdjust(itemId)) {
+				config.adjust.remove(itemId);
+				changed(true);
+			}
+		}, null, null, null));
+		y += 12;
+		small(ctx, "Right-click a slider to reset it", ix1, y, MUTED);
+		y += 10;
+		ctx.disableScissor();
+
+		int realContent = y + off - top + 6;
+		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
+		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+	}
+
+	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
+	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
+	                   float displayMul) {
+		float value = get.get();
+		boolean changedValue = Math.abs(value - def) > 1e-4f;
+		text(ctx, label, barX1, y, changedValue ? TEXT : TEXT2);
+		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
+			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
+		text(ctx, shown, barX2 - textW(shown), y, changedValue ? pal.accentText() : MUTED);
+
+		int by = y + 12;
+		roundRect(ctx, barX1, by, barX2, by + 3, pal.track());
+		float t = (value - min) / (max - min);
+		float t0 = (def - min) / (max - min);
+		int kx = barX1 + Math.round(t * (barX2 - barX1));
+		int zx = barX1 + Math.round(t0 * (barX2 - barX1));
+		fill(ctx, Math.min(kx, zx), by, Math.max(kx, zx), by + 3, pal.accent());
+		boolean hover = inside(mouseX, mouseY, barX1 - 3, y, barX2 + 3, y + 17) || dragging != null && dragging.label.equals(label);
+		if (hover) roundRect(ctx, kx - 5, by - 3, kx + 5, by + 6, pal.glow());
+		roundRect(ctx, kx - 3, by - 2, kx + 3, by + 5, 0xFFFFFFFF);
+
+		Slider slider = new Slider(label, min, max, step, def, get, set, barX1, barX2);
+		hits.add(new Hit(barX1 - 3, y, barX2 + 3, y + 17, null, null, null, slider));
+		return y + 20;
+	}
+
+	private void drawSettings(DrawContext ctx, int mouseX, int mouseY) {
+		int x1 = sideX, x2 = px + pw - 1, top = bodyY, bottom = footerY;
+		fill(ctx, x1, top, x2, bottom, pal.rail());
+		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
+		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
+		int y = top + 10;
+		bold(ctx, "Settings", ix1, y, TEXT);
+		y += 16;
+
+		text(ctx, "Theme", ix1, y, TEXT2);
+		y += 12;
+		Theme[] themes = Theme.values();
+		int gap = 4;
+		int tw = (iw - gap) / 2;
+		for (int i = 0; i < themes.length; i++) {
+			Theme t = themes[i];
+			int tx = ix1 + (i % 2) * (tw + gap);
+			int ty = y + (i / 2) * 18;
+			boolean on = t == theme();
+			boolean hover = inside(mouseX, mouseY, tx, ty, tx + tw, ty + 15);
+			roundRect(ctx, tx, ty, tx + tw, ty + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+			outline(ctx, tx, ty, tx + tw, ty + 15, on ? pal.accent() : pal.surfaceBorder());
+			roundRect(ctx, tx + 4, ty + 4, tx + 11, ty + 11, 0xFF000000 | t.accent);
+			text(ctx, t.label, tx + 15, ty + 4, on ? 0xFFFFFFFF : TEXT2);
+			hits.add(new Hit(tx, ty, tx + tw, ty + 15, () -> {
+				config.theme = t.name();
+				config.save();
+			}, null, null, null));
+		}
+		y += 3 * 18 + 6;
+
+		y = slider(ctx, "Opacity", "%", 0.4f, 1f, 0.05f, 0.78f, () -> config.opacity,
+			v -> {
+				config.opacity = v;
+				config.save();
+			}, ix1, ix2, y, mouseX, mouseY, 100f);
+		y += 4;
+
+		text(ctx, "Text font", ix1, y, TEXT2);
+		y += 12;
+		String[] fonts = {"Poppins", "Minecraft"};
+		for (int i = 0; i < 2; i++) {
+			int fx = ix1 + i * (tw + gap);
+			boolean on = config.minecraftFont == (i == 1);
+			boolean hover = inside(mouseX, mouseY, fx, y, fx + tw, y + 15);
+			roundRect(ctx, fx, y, fx + tw, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+			outline(ctx, fx, y, fx + tw, y + 15, on ? pal.accent() : pal.surfaceBorder());
+			text(ctx, fonts[i], fx + (tw - textW(fonts[i])) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
+			final boolean mc = i == 1;
+			hits.add(new Hit(fx, y, fx + tw, y + 15, () -> {
+				config.minecraftFont = mc;
+				config.save();
+			}, null, null, null));
+		}
+		y += 24;
+		small(ctx, "Menu key: Right Shift.", ix1, y, MUTED);
+		small(ctx, "Change it in Options > Controls.", ix1, y + 8, MUTED);
+		y += 24;
+		button(ctx, ix1, y, iw, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
+	}
+
+	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
+		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, pal.line());
+		int y = footerY + 5;
+		int right = px + pw - 8;
+
+		String applyLabel = "Apply changes";
+		int pillW = pending > 0 ? textW(String.valueOf(pending)) + 8 : 0;
+		int aw = textW(applyLabel) + 16 + (pending > 0 ? pillW + 6 : 0);
+		right -= aw;
+		boolean aHover = inside(mouseX, mouseY, right, y, right + aw, y + 16);
+		roundRect(ctx, right, y, right + aw, y + 16, aHover ? pal.strongHover() : pal.strong());
+		bold(ctx, applyLabel, right + 8, y + 4, 0xFFFFFFFF);
+		if (pending > 0) {
+			int pxl = right + 8 + textW(applyLabel) + 6;
+			roundRect(ctx, pxl, y + 3, pxl + pillW, y + 13, 0x38FFFFFF);
+			text(ctx, String.valueOf(pending), pxl + 4, y + 4, 0xFFFFFFFF);
+		}
+		hits.add(new Hit(right, y, right + aw, y + 16, this::apply, null, "Build the pack and reload textures", null));
+
+		// auto-apply switch
+		String auto = "Auto-apply";
+		int sw = 18 + 5 + textW(auto);
+		right -= sw + 12;
+		int trackY = y + 3;
+		roundRect(ctx, right, trackY, right + 18, trackY + 10, config.applyInstantly ? pal.strong() : pal.line2());
+		int knobX = config.applyInstantly ? right + 9 : right + 1;
+		roundRect(ctx, knobX, trackY + 1, knobX + 8, trackY + 9, 0xFFFFFFFF);
+		text(ctx, auto, right + 23, y + 4, TEXT2);
+		hits.add(new Hit(right, y, right + sw, y + 16, () -> {
+			config.applyInstantly = !config.applyInstantly;
+			config.save();
+			if (config.applyInstantly && pending > 0) apply();
+		}, null, "Apply every change right away (each one reloads textures)", null));
+		right -= 8;
+		fill(ctx, right, y + 2, right + 1, y + 14, pal.line2());
+
+		boolean small = pw < 520;
+		String rescan = "Rescan";
+		int rw = textW(rescan) + 12;
+		right -= rw + 6;
+		flatButton(ctx, right, y, rw, 16, rescan, mouseX, mouseY, this::rescan, "Look for new packs in the resourcepacks folder");
+		String folder = small ? "Folder" : "Packs folder";
+		int fw = textW(folder) + 12;
+		right -= fw + 2;
+		flatButton(ctx, right, y, fw, 16, folder, mouseX, mouseY,
+			() -> Util.getOperatingSystem().open(client.getResourcePackDir()), "Open your resourcepacks folder");
+
+		int sx = px + 12;
+		roundRect(ctx, sx, y + 5, sx + 5, y + 10, statusColor == WARN ? WARN : statusColor == GOOD ? GOOD : MUTED);
+		String found = index != null ? "  -  " + index.packs().size() + " packs found" : "";
+		int room = right - sx - 14;
+		if (room > 20) {
+			String st = trim(status, room);
+			text(ctx, st, sx + 10, y + 4, statusColor == MUTED ? TEXT2 : statusColor);
+			int used = textW(st);
+			if (!found.isEmpty() && used + textW(found) < room) {
+				text(ctx, found, sx + 10 + used, y + 4, MUTED);
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ previews
 
 	/** Bytes of the texture that best shows a pack's version of an item. */
 	private static byte[] previewBytes(PackSource pack, ItemInfo info) {
@@ -657,23 +1215,22 @@ public final class StudioScreen extends Screen {
 			if (info.mainTexture != null && pack.has(info.mainTexture)) return pack.read(info.mainTexture);
 		} catch (Exception ignored) {
 		}
-		String own = "assets/minecraft/textures/item/" + net.minecraft.util.Identifier.of(info.id).getPath() + ".png";
+		String own = "assets/minecraft/textures/item/" + Identifier.of(info.id).getPath() + ".png";
 		try {
 			if (pack.has(own)) return pack.read(own);
 		} catch (Exception ignored) {
 		}
-		// a model-only style: use the first layer texture of the pack's own model if it has one
-		for (String model : info.models) {
+		for (String model : info.chainModels) {
 			try {
-				String file = dev.itemstudio.pack.Refs.modelFile(model);
+				String file = Refs.modelFile(model);
 				if (!pack.has(file)) continue;
 				com.google.gson.JsonElement json = Resources.parse(pack.read(file));
 				if (json == null || !json.isJsonObject() || !json.getAsJsonObject().has("textures")) continue;
 				com.google.gson.JsonObject textures = json.getAsJsonObject().getAsJsonObject("textures");
 				for (String key : textures.keySet()) {
-					String ref = dev.itemstudio.pack.Refs.textureRef(textures.get(key));
+					String ref = Refs.textureRef(textures.get(key));
 					if (ref == null) continue;
-					String tex = dev.itemstudio.pack.Refs.textureFile(ref);
+					String tex = Refs.textureFile(ref);
 					if (pack.has(tex)) return pack.read(tex);
 					byte[] below = Resources.readBelow(tex);
 					if (below != null) return below;
@@ -682,30 +1239,6 @@ public final class StudioScreen extends Screen {
 			}
 		}
 		return null;
-	}
-
-	/** Places and frames the pack search box at y. Returns the y where content below it starts. */
-	private int drawStyleSearch(DrawContext ctx, int x1, int y, int x2) {
-		styleSearch.visible = true;
-		styleSearch.setX(x1 + 10);
-		styleSearch.setY(y + 4);
-		styleSearch.setWidth(x2 - x1 - 22);
-		int bx1 = x1 + 6, by1 = y, bx2 = x2 - 6, by2 = y + 16;
-		boolean focused = styleSearch.isFocused();
-		roundRect(ctx, bx1, by1, bx2, by2, focused ? CARD_HOVER : CARD);
-		outline(ctx, bx1, by1, bx2, by2, focused ? ACCENT : LINE);
-		return y + 20;
-	}
-
-	/** Cards whose pack names match the pack search. */
-	private List<Card> filterCards(List<Card> cards) {
-		if (styleQuery.isEmpty()) return cards;
-		List<Card> list = new ArrayList<>();
-		for (Card card : cards) {
-			String text = (card.name + " " + card.tooltip).toLowerCase(Locale.ROOT);
-			if (text.contains(styleQuery)) list.add(card);
-		}
-		return list;
 	}
 
 	/** Draws the top square of a texture scaled to size. Returns false if there is no image. */
@@ -717,258 +1250,87 @@ public final class StudioScreen extends Screen {
 		return true;
 	}
 
-	private void drawAdjust(DrawContext ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
-		// view chips, wrapping onto more rows if needed
-		int cx = x1 + 6, cy = top;
-		for (View v : View.values()) {
-			int w = textRenderer.getWidth(v.label) + 10;
-			if (cx + w > x2 - 6) {
-				cx = x1 + 6;
-				cy += 16;
-			}
-			boolean on = v == view;
-			boolean edited = config.getAdjust(info.id, v) != null && !config.getAdjust(info.id, v).isDefault();
-			boolean hover = inside(mouseX, mouseY, cx, cy, cx + w, cy + 13);
-			roundRect(ctx, cx, cy, cx + w, cy + 13, on ? ACCENT : hover ? CARD_HOVER : CARD);
-			ctx.drawText(textRenderer, v.label, cx + 5, cy + 3, on ? 0xFFFFFFFF : edited ? ACCENT : MUTED, false);
-			final View target = v;
-			hits.add(new Hit(cx, cy, cx + w, cy + 13, () -> view = target, null, null));
-			cx += w + 3;
-		}
-
-		int y = cy + 20;
-		String itemId = info.id;
-		Adjust current = config.getAdjust(itemId, view);
-		Adjust shown = current == null ? new Adjust() : current;
-		int barX1 = x1 + 10, barX2 = x2 - 10;
-
-		y = slider(ctx, "Size", "%", 0.1f, 3f, 0.05f, 1f, () -> shown.scale,
-			v -> config.editAdjust(itemId, view).scale = v, barX1, barX2, y, mouseX, mouseY, 100f);
-		y = slider(ctx, "Move left/right", "", -16f, 16f, 0.25f, 0f, () -> shown.x,
-			v -> config.editAdjust(itemId, view).x = v, barX1, barX2, y, mouseX, mouseY, 1f);
-		y = slider(ctx, "Move up/down", "", -16f, 16f, 0.25f, 0f, () -> shown.y,
-			v -> config.editAdjust(itemId, view).y = v, barX1, barX2, y, mouseX, mouseY, 1f);
-		y = slider(ctx, "Move forward/back", "", -16f, 16f, 0.25f, 0f, () -> shown.z,
-			v -> config.editAdjust(itemId, view).z = v, barX1, barX2, y, mouseX, mouseY, 1f);
-		y = slider(ctx, "Tilt (X)", "°", -180f, 180f, 5f, 0f, () -> shown.rotX,
-			v -> config.editAdjust(itemId, view).rotX = v, barX1, barX2, y, mouseX, mouseY, 1f);
-		y = slider(ctx, "Turn (Y)", "°", -180f, 180f, 5f, 0f, () -> shown.rotY,
-			v -> config.editAdjust(itemId, view).rotY = v, barX1, barX2, y, mouseX, mouseY, 1f);
-		y = slider(ctx, "Roll (Z)", "°", -180f, 180f, 5f, 0f, () -> shown.rotZ,
-			v -> config.editAdjust(itemId, view).rotZ = v, barX1, barX2, y, mouseX, mouseY, 1f);
-
-		int bw = (x2 - x1 - 16) / 2;
-		if (y + 15 <= y2 - 2) {
-			button(ctx, x1 + 6, y + 2, bw, 14, "Reset " + view.label, false, mouseX, mouseY, () -> {
-				Adjust a = config.getAdjust(itemId, view);
-				if (a != null && !a.isDefault()) {
-					a.reset();
-					changed(true);
-				}
-			}, null);
-			button(ctx, x1 + 10 + bw, y + 2, bw, 14, "Reset all views", false, mouseX, mouseY, () -> {
-				if (config.hasAdjust(itemId)) {
-					config.adjust.remove(itemId);
-					changed(true);
-				}
-			}, null);
-		}
-		if (y + 34 <= y2 - 2) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth("Right-click a slider to reset it", x2 - x1 - 12),
-				x1 + 6, y + 22, MUTED, false);
-		}
-	}
-
-	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
-	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
-	                   float displayMul) {
-		float value = get.get();
-		boolean changedValue = Math.abs(value - def) > 1e-4f;
-		ctx.drawText(textRenderer, label, barX1, y, changedValue ? TEXT : MUTED, false);
-		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
-			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
-		ctx.drawText(textRenderer, shown, barX2 - textRenderer.getWidth(shown), y, changedValue ? ACCENT : MUTED, false);
-
-		int by = y + 11;
-		fill(ctx, barX1, by, barX2, by + 3, CARD_HOVER);
-		float t = (value - min) / (max - min);
-		float t0 = (def - min) / (max - min);
-		int kx = barX1 + Math.round(t * (barX2 - barX1));
-		int zx = barX1 + Math.round(t0 * (barX2 - barX1));
-		fill(ctx, Math.min(kx, zx), by, Math.max(kx, zx), by + 3, ACCENT);
-		fill(ctx, zx, by - 1, zx + 1, by + 4, MUTED);
-		boolean hover = inside(mouseX, mouseY, barX1 - 3, y, barX2 + 3, y + 17);
-		fill(ctx, kx - 2, by - 3, kx + 2, by + 6, hover || dragging != null && dragging.label.equals(label) ? 0xFFFFFFFF : 0xFFD8D2FF);
-
-		Slider slider = new Slider(label, min, max, step, def, get, set, barX1, barX2);
-		hits.add(new Hit(barX1 - 3, y, barX2 + 3, y + 17, null, null, slider));
-		return y + 20;
-	}
-
-	private void drawBulk(DrawContext ctx, int mouseX, int mouseY) {
-		int x1 = detailX, y1 = bodyY + 2, x2 = detailX + detailW, y2 = footerY - 2;
-		roundRect(ctx, x1, y1, x2, y2, SIDE);
-		if (!ready()) {
-			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
-			return;
-		}
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("One pack for all " + category.label, detailW - 12), x1 + 8, y1 + 8, TEXT, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("Click a pack to use it for every", detailW - 12), x1 + 8, y1 + 20, MUTED, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("item in this group that it has.", detailW - 12), x1 + 8, y1 + 30, MUTED, false);
-
-		List<Card> cards = new ArrayList<>();
-		Item first = category.items().isEmpty() ? null : category.items().get(0);
-		ItemInfo firstInfo = first == null ? null : ItemInfo.of(first);
-		String main = firstInfo == null ? null : firstInfo.mainTexture;
-		cards.add(new Card(null, List.of(), "Default", "Undo: stop changing every item in this group",
-			() -> main == null ? null : Resources.readBelow(main), "below|" + main));
-		cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look for the whole group",
-			() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
-		Map<String, Integer> counts = new HashMap<>();
-		Map<String, List<FilePackSource>> groups = new java.util.LinkedHashMap<>();
-		Map<String, ItemInfo> previewInfos = new HashMap<>();
-		for (FilePackSource pack : index.packs()) {
-			int count = 0;
-			ItemInfo shownInfo = null;
-			StringBuilder look = new StringBuilder();
-			for (Item item : category.items()) {
-				ItemInfo info = ItemInfo.of(item);
-				if (index.provided(pack, info).any()) {
-					count++;
-					if (shownInfo == null) shownInfo = info;
-					look.append(info.id).append('=').append(index.fingerprint(pack, info)).append(';');
-				}
-			}
-			if (count == 0) continue;
-			counts.put(pack.id(), count);
-			previewInfos.put(pack.id(), shownInfo);
-			// packs that are identical for every item in the group become one card
-			groups.computeIfAbsent(look.toString(), k -> new ArrayList<>()).add(pack);
-		}
-		for (List<FilePackSource> group : groups.values()) {
-			FilePackSource pack = group.get(0);
-			int count = counts.get(pack.id());
-			final ItemInfo previewInfo = previewInfos.get(pack.id());
-			List<String> ids = new ArrayList<>();
-			for (FilePackSource p : group) ids.add(p.id());
-			String name = group.size() == 1 ? pack.displayName() : pack.displayName() + " +" + (group.size() - 1);
-			String tip = (group.size() == 1 ? pack.displayName() : "Same look in " + group.size() + " packs: " + names(group))
-				+ " (" + count + " item" + (count == 1 ? "" : "s") + ")";
-			cards.add(new Card(pack.id(), ids, name, tip, () -> previewBytes(pack, previewInfo), pack.id() + "|" + previewInfo.id));
-		}
-
-		boolean noPacks = cards.size() == 2;
-		int top = drawStyleSearch(ctx, x1, y1 + 42, x2), bottom = y2 - 4;
-		cards = filterCards(cards);
-		boolean noMatch = cards.isEmpty();
-		int innerW = x2 - x1 - 12;
-		int cols = Math.max(2, innerW / 58);
-		int gap = 4;
-		int cardW = (innerW - gap * (cols - 1)) / cols;
-		int cardH = cardW + 22;
-		int rows = (cards.size() + cols - 1) / cols;
-		int content = rows * (cardH + gap) + (noPacks || noMatch ? 24 : 0);
-		int off = scrollOf("detail", content, bottom - top);
-		scrollAreas.add(new ScrollArea("detail", x1, top, x2, bottom, Math.max(0, content - (bottom - top))));
-
-		ctx.enableScissor(x1, top, x2, bottom);
-		for (int i = 0; i < cards.size(); i++) {
-			Card card = cards.get(i);
-			int cx = x1 + 6 + (i % cols) * (cardW + gap);
-			int cy = top + (i / cols) * (cardH + gap) - off;
-			if (cy + cardH < top || cy > bottom) continue;
-			boolean hover = inside(mouseX, mouseY, cx, Math.max(cy, top), cx + cardW, Math.min(cy + cardH, bottom));
-			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, hover ? CARD_HOVER : CARD);
-			int size = cardW - 8;
-			if (!drawPreview(ctx, card.imageKey, card.image, cx + 4, cy + 4, size) && first != null) {
-				ctx.drawItem(stack(first), cx + cardW / 2 - 8, cy + cardW / 2 - 8);
-			}
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1, TEXT, false);
-			String sub = card.sourceId == null ? "reset" : card.sourceId.equals(VanillaSource.ID) ? "all items"
-				: counts.get(card.sourceId) + " item" + (counts.get(card.sourceId) == 1 ? "" : "s");
-			ctx.drawText(textRenderer, sub, cx + 3, cy + cardW + 9, MUTED, false);
-			final String sourceId = card.sourceId;
-			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> useForCategory(sourceId), card.tooltip);
-		}
-		if (noMatch) {
-			int hy = top + rows * (cardH + gap) - off + 2;
-			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
-		} else if (noPacks) {
-			int hy = top + rows * (cardH + gap) - off + 2;
-			ctx.drawText(textRenderer, "None of your packs change", x1 + 6, hy, MUTED, false);
-			ctx.drawText(textRenderer, "items in this group.", x1 + 6, hy + 10, MUTED, false);
-		}
-		ctx.disableScissor();
-	}
-
-	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
-		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, LINE);
-		int y = footerY + 4;
-		int right = px + pw - 6;
-
-		String applyLabel = pending > 0 ? "Apply (" + pending + ")" : "Apply";
-		int w = textRenderer.getWidth(applyLabel) + 16;
-		right -= w;
-		button(ctx, right, y, w, 15, applyLabel, true, mouseX, mouseY, this::apply,
-			"Build the pack and reload textures");
-
-		String auto = "Auto-apply: " + (config.applyInstantly ? "On" : "Off");
-		w = textRenderer.getWidth(auto) + 12;
-		right -= w + 4;
-		button(ctx, right, y, w, 15, auto, false, mouseX, mouseY, () -> {
-			config.applyInstantly = !config.applyInstantly;
-			config.save();
-			if (config.applyInstantly && pending > 0) apply();
-		}, "Apply every change right away (each one reloads textures)");
-
-		boolean small = pw < 520;
-		String rescan = small ? "Rescan" : "Rescan packs";
-		w = textRenderer.getWidth(rescan) + 12;
-		right -= w + 4;
-		button(ctx, right, y, w, 15, rescan, false, mouseX, mouseY, this::rescan,
-			"Look for new packs in the resourcepacks folder");
-
-		String folder = small ? "Folder" : "Packs folder";
-		w = textRenderer.getWidth(folder) + 12;
-		right -= w + 4;
-		button(ctx, right, y, w, 15, folder, false, mouseX, mouseY,
-			() -> Util.getOperatingSystem().open(client.getResourcePackDir()), "Open your resourcepacks folder");
-
-		int statusW = right - (px + 10) - 6;
-		if (statusW > 20) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(status, statusW), px + 10, y + 4, statusColor, false);
-		}
-	}
-
 	// ------------------------------------------------------------------ small drawing helpers
 
-	private void button(DrawContext ctx, int x, int y, int w, int h, String label, boolean primary,
+	private void button(DrawContext ctx, int x, int y, int w, int h, String label, boolean primary, boolean outlined,
 	                    int mouseX, int mouseY, Runnable action, String tooltip) {
 		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + h);
-		int bg = primary ? (hover ? 0xFF9C82FF : ACCENT) : (hover ? CARD_HOVER : CARD);
+		int bg = primary ? (hover ? pal.strongHover() : pal.strong()) : outlined ? pal.cardOn() : (hover ? pal.surfaceHover() : pal.surface());
 		roundRect(ctx, x, y, x + w, y + h, bg);
-		if (!primary) outline(ctx, x, y, x + w, y + h, LINE);
-		int tw = textRenderer.getWidth(label);
-		ctx.drawText(textRenderer, label, x + (w - tw) / 2, y + (h - 8) / 2, primary ? 0xFFFFFFFF : TEXT, false);
-		hits.add(new Hit(x, y, x + w, y + h, action, tooltip, null));
+		if (!primary) outline(ctx, x, y, x + w, y + h, outlined ? pal.accent() : pal.surfaceBorder());
+		int tw = textW(label);
+		text(ctx, label, x + (w - tw) / 2, y + (h - 8) / 2, primary ? 0xFFFFFFFF : outlined ? pal.accentText() : TEXT);
+		hits.add(new Hit(x, y, x + w, y + h, action, null, tooltip, null));
 	}
 
-	private void tabButton(DrawContext ctx, int x, int y, int w, String label, boolean on,
-	                       int mouseX, int mouseY, Runnable action) {
-		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + 15);
-		roundRect(ctx, x, y, x + w, y + 15, on ? CARD_HOVER : hover ? CARD : SIDE);
-		if (on) fill(ctx, x + 4, y + 13, x + w - 4, y + 15, ACCENT);
-		String text = textRenderer.trimToWidth(label, w - 6);
-		ctx.drawText(textRenderer, text, x + (w - textRenderer.getWidth(text)) / 2, y + 4, on ? TEXT : MUTED, false);
-		hits.add(new Hit(x, y, x + w, y + 15, action, null, null));
+	private void flatButton(DrawContext ctx, int x, int y, int w, int h, String label, int mouseX, int mouseY,
+	                        Runnable action, String tooltip) {
+		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + h);
+		if (hover) roundRect(ctx, x, y, x + w, y + h, pal.surfaceHover());
+		text(ctx, label, x + 6, y + 4, hover ? 0xFFFFFFFF : TEXT2);
+		hits.add(new Hit(x, y, x + w, y + h, action, null, tooltip, null));
+	}
+
+	private void iconButton(DrawContext ctx, int x, int y, String tooltip, int mouseX, int mouseY, boolean on, Runnable action) {
+		boolean hover = inside(mouseX, mouseY, x, y, x + 16, y + 16);
+		roundRect(ctx, x, y, x + 16, y + 16, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
+		if (!on) outline(ctx, x, y, x + 16, y + 16, pal.surfaceBorder());
+		hits.add(new Hit(x, y, x + 16, y + 16, action, null, tooltip, null));
+	}
+
+	private static void drawSearchIcon(DrawContext ctx, int x, int y, int color) {
+		fill(ctx, x + 1, y, x + 5, y + 1, color);
+		fill(ctx, x + 1, y + 5, x + 5, y + 6, color);
+		fill(ctx, x, y + 1, x + 1, y + 5, color);
+		fill(ctx, x + 5, y + 1, x + 6, y + 5, color);
+		fill(ctx, x + 5, y + 5, x + 6, y + 6, color);
+		fill(ctx, x + 6, y + 6, x + 7, y + 7, color);
+		fill(ctx, x + 7, y + 7, x + 8, y + 8, color);
+	}
+
+	private static void drawCross(DrawContext ctx, int x, int y, int color) {
+		for (int i = 0; i < 6; i++) {
+			fill(ctx, x + i, y + i, x + i + 1, y + i + 1, color);
+			fill(ctx, x + 5 - i, y + i, x + 6 - i, y + i + 1, color);
+		}
+	}
+
+	private static void drawGear(DrawContext ctx, int x, int y, int color) {
+		fill(ctx, x + 2, y + 1, x + 6, y + 7, color);
+		fill(ctx, x + 1, y + 2, x + 7, y + 6, color);
+		fill(ctx, x + 3, y, x + 5, y + 8, color);
+		fill(ctx, x, y + 3, x + 8, y + 5, color);
+		fill(ctx, x + 3, y + 3, x + 5, y + 5, 0xFF101010);
+	}
+
+	private static void drawCheck(DrawContext ctx, int x, int y, int color) {
+		fill(ctx, x, y + 2, x + 1, y + 3, color);
+		fill(ctx, x + 1, y + 3, x + 2, y + 4, color);
+		fill(ctx, x + 2, y + 4, x + 3, y + 5, color);
+		fill(ctx, x + 3, y + 3, x + 4, y + 4, color);
+		fill(ctx, x + 4, y + 2, x + 5, y + 3, color);
+		fill(ctx, x + 5, y + 1, x + 6, y + 2, color);
+	}
+
+	private static void drawStar(DrawContext ctx, int x, int y, int color) {
+		fill(ctx, x + 2, y, x + 3, y + 1, color);
+		fill(ctx, x + 1, y + 1, x + 4, y + 2, color);
+		fill(ctx, x, y + 2, x + 5, y + 3, color);
+		fill(ctx, x + 1, y + 3, x + 4, y + 4, color);
+		fill(ctx, x, y + 4, x + 2, y + 5, color);
+		fill(ctx, x + 3, y + 4, x + 5, y + 5, color);
 	}
 
 	/** Adds a click area clipped to a scrolling region's visible part. */
-	private void addHit(int x1, int y1, int x2, int y2, int clipTop, int clipBottom, Runnable action, String tooltip) {
+	private void addHit(int x1, int y1, int x2, int y2, int clipTop, int clipBottom, Runnable action, Runnable right, String tooltip) {
 		int top = Math.max(y1, clipTop);
 		int bottom = Math.min(y2, clipBottom);
 		if (bottom <= top) return;
-		hits.add(new Hit(x1, top, x2, bottom, action, tooltip, null));
+		hits.add(new Hit(x1, top, x2, bottom, action, right, tooltip, null));
+	}
+
+	private void addHit(int x1, int y1, int x2, int y2, int clipTop, int clipBottom, Runnable action, String tooltip) {
+		addHit(x1, y1, x2, y2, clipTop, clipBottom, action, null, tooltip);
 	}
 
 	private int scrollOf(String key, int content, int view) {
@@ -1015,7 +1377,7 @@ public final class StudioScreen extends Screen {
 	@Override
 	public boolean mouseClicked(Click click, boolean doubled) {
 		double x = click.x(), y = click.y();
-		if (search.isMouseOver(x, y) || styleSearch.isMouseOver(x, y)) {
+		if (search.isMouseOver(x, y) || (styleSearch.visible && styleSearch.isMouseOver(x, y))) {
 			return super.mouseClicked(click, doubled);
 		}
 		setFocused(null);
@@ -1033,6 +1395,13 @@ public final class StudioScreen extends Screen {
 					dragging.setFromMouse(x);
 				}
 				return true;
+			}
+			if (click.button() == 1) {
+				if (hit.rightAction != null) {
+					hit.rightAction.run();
+					return true;
+				}
+				continue;
 			}
 			if (hit.action != null) {
 				hit.action.run();
@@ -1054,8 +1423,9 @@ public final class StudioScreen extends Screen {
 	@Override
 	public boolean mouseReleased(Click click) {
 		if (dragging != null) {
+			boolean setting = dragging.label.equals("Opacity");
 			dragging = null;
-			changed(true);
+			if (!setting) changed(true);
 			return true;
 		}
 		return super.mouseReleased(click);
@@ -1076,6 +1446,10 @@ public final class StudioScreen extends Screen {
 	@Override
 	public boolean keyPressed(KeyInput input) {
 		if (input.isEscape()) {
+			if (settingsOpen) {
+				settingsOpen = false;
+				return true;
+			}
 			close();
 			return true;
 		}
