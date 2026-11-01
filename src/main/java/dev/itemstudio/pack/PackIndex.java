@@ -29,11 +29,11 @@ public final class PackIndex {
 	private final Map<String, String> fingerprintCache = new HashMap<>();
 	private final Map<String, Boolean> sameAsVanillaCache = new HashMap<>();
 	private final Map<String, Boolean> sameAsBelowCache = new HashMap<>();
-	/** Per pack: HUD part -> its files in that pack (lower-case paths, .png only). */
-	private final Map<String, Map<HudElement, List<String>>> hudFiles = new HashMap<>();
+	/** Per pack: texture part (HUD, particle) -> its files in that pack (lower-case paths, .png only). */
+	private final Map<String, Map<TexturePart, List<String>>> partFiles = new HashMap<>();
 	private final Map<String, String> hudFingerprintCache = new HashMap<>();
 	private final Map<String, Boolean> hudSameAsBelowCache = new HashMap<>();
-	private final Map<HudElement, Boolean> hudBelowIsVanillaCache = new HashMap<>();
+	private final Map<TexturePart, Boolean> hudBelowIsVanillaCache = new HashMap<>();
 
 	/** The files a source has for one item. */
 	/**
@@ -75,14 +75,14 @@ public final class PackIndex {
 		}
 		for (FilePackSource pack : index.packs) {
 			index.namedTextures.put(pack.id(), matchNamedTextures(pack, itemPaths));
-			Map<HudElement, List<String>> hud = new HashMap<>();
+			Map<TexturePart, List<String>> parts = new HashMap<>();
 			for (String path : pack.paths()) {
 				String lower = path.toLowerCase();
-				HudElement element = HudElement.of(lower);
-				if (element != null) hud.computeIfAbsent(element, k -> new ArrayList<>()).add(lower);
+				TexturePart part = TexturePart.of(lower);
+				if (part != null) parts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
 			}
-			hud.values().forEach(java.util.Collections::sort);
-			index.hudFiles.put(pack.id(), hud);
+			parts.values().forEach(java.util.Collections::sort);
+			index.partFiles.put(pack.id(), parts);
 		}
 		return index;
 	}
@@ -278,13 +278,13 @@ public final class PackIndex {
 		}
 	}
 
-	// ---------------------------------------------------------------- HUD parts
+	// ---------------------------------------------------------------- texture parts (HUD, particles)
 
 	/** Every file name any scanned pack uses for a HUD part, plus its preview file. */
-	public List<String> hudAllFiles(HudElement element) {
+	public List<String> partAllFiles(TexturePart element) {
 		Set<String> all = new java.util.TreeSet<>();
-		all.add(element.preview);
-		for (Map<HudElement, List<String>> map : hudFiles.values()) {
+		all.add(element.preview());
+		for (Map<TexturePart, List<String>> map : partFiles.values()) {
 			List<String> files = map.get(element);
 			if (files != null) all.addAll(files);
 		}
@@ -292,36 +292,36 @@ public final class PackIndex {
 	}
 
 	/** The files a source has for a HUD part. For vanilla: the game's own versions of every known file. */
-	public List<String> hudFiles(PackSource source, HudElement element) {
+	public List<String> partFiles(PackSource source, TexturePart element) {
 		if (source instanceof VanillaSource) {
 			List<String> list = new ArrayList<>();
-			for (String file : hudAllFiles(element)) {
+			for (String file : partAllFiles(element)) {
 				if (source.has(file)) list.add(file);
 			}
 			return list;
 		}
-		Map<HudElement, List<String>> map = hudFiles.get(source.id());
+		Map<TexturePart, List<String>> map = partFiles.get(source.id());
 		List<String> files = map == null ? null : map.get(element);
 		return files == null ? List.of() : files;
 	}
 
-	public List<FilePackSource> packsForHud(HudElement element) {
+	public List<FilePackSource> packsForPart(TexturePart element) {
 		List<FilePackSource> list = new ArrayList<>();
 		for (FilePackSource pack : packs) {
-			if (!hudFiles(pack, element).isEmpty()) list.add(pack);
+			if (!partFiles(pack, element).isEmpty()) list.add(pack);
 		}
 		return list;
 	}
 
 	/** Same idea as fingerprint(): packs with identical files for a HUD part look the same. */
-	public String hudFingerprint(PackSource source, HudElement element) {
-		String key = source.id() + "|" + element.name();
+	public String partFingerprint(PackSource source, TexturePart element) {
+		String key = source.id() + "|" + element.key();
 		String cached = hudFingerprintCache.get(key);
 		if (cached != null) return cached;
 		String result;
 		try {
 			java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-1");
-			for (String file : hudFiles(source, element)) {
+			for (String file : partFiles(source, element)) {
 				digest.update(file.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 				digest.update((byte) 0);
 				digest.update(source.read(file));
@@ -337,9 +337,9 @@ public final class PackIndex {
 	}
 
 	/** True when a pack's files for a HUD part are exactly what the game already uses. */
-	public boolean hudSameAsBelow(PackSource source, HudElement element) {
-		return hudSameAsBelowCache.computeIfAbsent(source.id() + "|" + element.name(), k -> {
-			List<String> files = hudFiles(source, element);
+	public boolean partSameAsBelow(PackSource source, TexturePart element) {
+		return hudSameAsBelowCache.computeIfAbsent(source.id() + "|" + element.key(), k -> {
+			List<String> files = partFiles(source, element);
 			if (files.isEmpty()) return false;
 			try {
 				for (String file : files) {
@@ -353,9 +353,9 @@ public final class PackIndex {
 	}
 
 	/** True when no turned-on pack changes this HUD part. */
-	public boolean hudBelowIsVanilla(HudElement element) {
+	public boolean partBelowIsVanilla(TexturePart element) {
 		return hudBelowIsVanillaCache.computeIfAbsent(element, e -> {
-			for (String file : hudAllFiles(e)) {
+			for (String file : partAllFiles(e)) {
 				if (!java.util.Arrays.equals(Resources.readBelow(file), Resources.readVanilla(file))) return false;
 			}
 			return true;

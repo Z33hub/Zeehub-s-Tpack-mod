@@ -30,6 +30,7 @@ public enum Category {
 	TOOLS("Other tools", Items.DIAMOND_SHOVEL, p -> p.endsWith("_shovel") || p.endsWith("_hoe")
 		|| Set.of("shears", "brush", "spyglass", "clock", "compass", "recovery_compass").contains(p)),
 	HUD("HUD", Items.PAPER, p -> false),
+	PARTICLES("Particles", Items.BLAZE_POWDER, p -> false),
 	ALL("All items", Items.CHEST, p -> true);
 
 	public final String label;
@@ -41,6 +42,15 @@ public enum Category {
 		this.label = label;
 		this.icon = icon;
 		this.match = match;
+	}
+
+	/** Texture parts shown instead of items (HUD, particles); empty for item categories. */
+	public List<dev.itemstudio.pack.TexturePart> parts() {
+		return switch (this) {
+			case HUD -> List.of(dev.itemstudio.pack.HudElement.values());
+			case PARTICLES -> List.of(dev.itemstudio.pack.ParticleElement.values());
+			default -> List.of();
+		};
 	}
 
 	public List<Item> items() {
