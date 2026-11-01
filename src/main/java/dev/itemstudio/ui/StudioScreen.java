@@ -11,16 +11,16 @@ import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
 import dev.itemstudio.pack.Resources;
 import dev.itemstudio.pack.VanillaSource;
-import net.minecraft.client.gl.RenderPipelines;
-import net.minecraft.client.gui.Click;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.TextFieldWidget;
-import net.minecraft.client.input.KeyInput;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.registry.Registries;
-import net.minecraft.text.Text;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.input.KeyEvent;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.util.Util;
 import org.joml.Matrix3x2fStack;
 
@@ -99,16 +99,16 @@ public final class StudioScreen extends Screen {
 	private String status = "";
 	private int statusColor = MUTED;
 	private Slider dragging;
-	private TextFieldWidget search;
+	private EditBox search;
 	/** Filters the style cards by pack name. */
-	private TextFieldWidget styleSearch;
+	private EditBox styleSearch;
 	private String styleQuery = "";
 
 	// layout
 	private int px, py, pw, ph, bodyY, bodyH, sideW, gridX, gridW, detailX, detailW, footerY;
 
 	public StudioScreen(Screen parent) {
-		super(Text.translatable("itemstudio.title"));
+		super(Component.translatable("itemstudio.title"));
 		this.parent = parent;
 	}
 
@@ -136,40 +136,40 @@ public final class StudioScreen extends Screen {
 		gridW = detailX - gridX - 6;
 
 		int searchW = Math.min(150, Math.max(70, pw / 4));
-		search = new TextFieldWidget(textRenderer, px + pw - searchW - 26, py + 8, searchW - 8, 10, Text.literal("Search"));
-		search.setDrawsBackground(false);
+		search = new EditBox(font, px + pw - searchW - 26, py + 8, searchW - 8, 10, Component.literal("Search"));
+		search.setBordered(false);
 		search.setMaxLength(50);
-		search.setText(query);
-		search.setPlaceholder(Text.literal("Search all items"));
-		search.setChangedListener(text -> {
+		search.setValue(query);
+		search.setHint(Component.literal("Search all items"));
+		search.setResponder(text -> {
 			query = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("grid", 0);
 			bulkMode = false;
 		});
-		addDrawableChild(search);
+		addRenderableWidget(search);
 
-		styleSearch = new TextFieldWidget(textRenderer, detailX + 10, bodyY + 74, detailW - 24, 10, Text.literal("Search packs"));
-		styleSearch.setDrawsBackground(false);
+		styleSearch = new EditBox(font, detailX + 10, bodyY + 74, detailW - 24, 10, Component.literal("Search packs"));
+		styleSearch.setBordered(false);
 		styleSearch.setMaxLength(50);
-		styleSearch.setText(styleQuery);
-		styleSearch.setPlaceholder(Text.literal("Search packs"));
-		styleSearch.setChangedListener(text -> {
+		styleSearch.setValue(styleQuery);
+		styleSearch.setHint(Component.literal("Search packs"));
+		styleSearch.setResponder(text -> {
 			styleQuery = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("detail", 0);
 		});
 		styleSearch.visible = false;
-		addDrawableChild(styleSearch);
+		addRenderableWidget(styleSearch);
 	}
 
 	@Override
-	public boolean shouldPause() {
+	public boolean isPauseScreen() {
 		return false;
 	}
 
 	@Override
-	public void close() {
+	public void onClose() {
 		if (pending > 0) apply();
-		client.setScreen(parent);
+		minecraft.gui.setScreen(parent);
 	}
 
 	@Override
@@ -288,13 +288,13 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void setStyle(Item item, String sourceId) {
-		String id = Registries.ITEM.getId(item).toString();
+		String id = BuiltInRegistries.ITEM.getKey(item).toString();
 		if (sourceId == null) config.styles.remove(id);
 		else config.styles.put(id, sourceId);
 	}
 
 	private String styleOf(Item item) {
-		return config.styles.get(Registries.ITEM.getId(item).toString());
+		return config.styles.get(BuiltInRegistries.ITEM.getKey(item).toString());
 	}
 
 	private void useForCategory(String sourceId) {
@@ -326,8 +326,8 @@ public final class StudioScreen extends Screen {
 		if (query.equals(searchCacheQuery)) return searchCache; // only search again when the text changes
 		List<Item> list = new ArrayList<>();
 		for (Item item : Category.ALL.items()) {
-			String id = Registries.ITEM.getId(item).getPath();
-			String name = item.getName().getString().toLowerCase(Locale.ROOT);
+			String id = BuiltInRegistries.ITEM.getKey(item).getPath();
+			String name = stack(item).getHoverName().getString().toLowerCase(Locale.ROOT);
 			if (id.contains(query.replace(' ', '_')) || name.contains(query)) list.add(item);
 		}
 		searchCacheQuery = query;
@@ -338,7 +338,7 @@ public final class StudioScreen extends Screen {
 	// ------------------------------------------------------------------ rendering
 
 	@Override
-	public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+	public void extractRenderState(GuiGraphicsExtractor ctx, int mouseX, int mouseY, float delta) {
 		hits.clear();
 		scrollAreas.clear();
 
@@ -356,23 +356,23 @@ public final class StudioScreen extends Screen {
 		}
 		drawFooter(ctx, mouseX, mouseY);
 
-		super.render(ctx, mouseX, mouseY, delta); // the search box
+		super.extractRenderState(ctx, mouseX, mouseY, delta); // the search box
 
 		for (int i = hits.size() - 1; i >= 0; i--) {
 			Hit hit = hits.get(i);
 			if (hit.tooltip != null && hit.contains(mouseX, mouseY)) {
-				ctx.drawTooltip(Text.literal(hit.tooltip), mouseX, mouseY);
+				ctx.setTooltipForNextFrame(Component.literal(hit.tooltip), mouseX, mouseY);
 				break;
 			}
 		}
 	}
 
-	private void drawHeader(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawHeader(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		fill(ctx, px + 10, py + 8, px + 13, py + 17, ACCENT);
-		ctx.drawText(textRenderer, "Item Studio", px + 18, py + 9, TEXT, false);
-		int titleW = textRenderer.getWidth("Item Studio");
+		ctx.text(font, "Item Studio", px + 18, py + 9, TEXT, false);
+		int titleW = font.width("Item Studio");
 		if (pw > 360) {
-			ctx.drawText(textRenderer, "pick a look for every item", px + 26 + titleW, py + 9, MUTED, false);
+			ctx.text(font, "pick a look for every item", px + 26 + titleW, py + 9, MUTED, false);
 		}
 
 		// search box frame
@@ -384,13 +384,13 @@ public final class StudioScreen extends Screen {
 		int cx = px + pw - 20, cy = py + 5;
 		boolean hover = inside(mouseX, mouseY, cx, cy, cx + 15, cy + 15);
 		roundRect(ctx, cx, cy, cx + 15, cy + 15, hover ? 0xFF3A2030 : CARD);
-		ctx.drawText(textRenderer, "x", cx + 5, cy + 3, hover ? 0xFFFF7A90 : MUTED, false);
-		hits.add(new Hit(cx, cy, cx + 15, cy + 15, this::close, "Close (changes are applied)", null));
+		ctx.text(font, "x", cx + 5, cy + 3, hover ? 0xFFFF7A90 : MUTED, false);
+		hits.add(new Hit(cx, cy, cx + 15, cy + 15, this::onClose, "Close (changes are applied)", null));
 
 		fill(ctx, px + 1, bodyY - 2, px + pw - 1, bodyY - 1, LINE);
 	}
 
-	private void drawSidebar(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawSidebar(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x1 = px + 4, y1 = bodyY + 2, x2 = px + 4 + sideW, y2 = footerY - 2;
 		roundRect(ctx, x1, y1, x2, y2, SIDE);
 		Category[] cats = Category.values();
@@ -410,16 +410,16 @@ public final class StudioScreen extends Screen {
 			} else if (hover) {
 				fill(ctx, x1 + 2, y, x2 - 2, y + rowH - 1, CARD_HOVER);
 			}
-			ctx.drawItem(stack(cat.icon), x1 + 5, y + 2);
+			ctx.fakeItem(stack(cat.icon), x1 + 5, y + 2);
 			if (sideW > 40) {
-				ctx.drawText(textRenderer, textRenderer.trimToWidth(cat.label, sideW - 30), x1 + 25, y + 6,
+				ctx.text(font, font.plainSubstrByWidth(cat.label, sideW - 30), x1 + 25, y + 6,
 					active ? TEXT : MUTED, false);
 			}
 			final Category target = cat;
 			addHit(x1, y, x2, y + rowH, y1, y2, () -> {
 				category = target;
 				query = "";
-				search.setText("");
+				search.setValue("");
 				bulkMode = false;
 				scroll.put("grid", 0);
 				if (!target.items().isEmpty()) selected = target.items().get(0);
@@ -429,18 +429,18 @@ public final class StudioScreen extends Screen {
 		ctx.disableScissor();
 	}
 
-	private void drawGrid(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawGrid(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		List<Item> items = gridItems();
 		boolean searching = !query.isEmpty();
 		String title = searching ? "Search: " + items.size() + " found" : category.label;
-		ctx.drawText(textRenderer, title, gridX, bodyY + 6, TEXT, false);
+		ctx.text(font, title, gridX, bodyY + 6, TEXT, false);
 		if (!searching) {
-			ctx.drawText(textRenderer, items.size() + " items", gridX + textRenderer.getWidth(title) + 6, bodyY + 6, MUTED, false);
+			ctx.text(font, items.size() + " items", gridX + font.width(title) + 6, bodyY + 6, MUTED, false);
 		}
 
 		if (!searching && category != Category.ALL) {
 			String label = bulkMode ? "Back to item" : "One pack for all";
-			int bw = textRenderer.getWidth(label) + 12;
+			int bw = font.width(label) + 12;
 			button(ctx, gridX + gridW - bw, bodyY + 2, bw, 15, label, bulkMode, mouseX, mouseY, () -> {
 				bulkMode = !bulkMode;
 				scroll.put("detail", 0);
@@ -456,7 +456,7 @@ public final class StudioScreen extends Screen {
 		scrollAreas.add(new ScrollArea("grid", gridX, top, gridX + gridW, bottom, Math.max(0, content - (bottom - top))));
 
 		if (items.isEmpty()) {
-			ctx.drawText(textRenderer, "Nothing matches", gridX, top + 4, MUTED, false);
+			ctx.text(font, "Nothing matches", gridX, top + 4, MUTED, false);
 			return;
 		}
 		ctx.enableScissor(gridX, top, gridX + gridW, bottom);
@@ -469,8 +469,8 @@ public final class StudioScreen extends Screen {
 			boolean hover = inside(mouseX, mouseY, x, Math.max(y, top), x + cell - 2, Math.min(y + cell - 2, bottom));
 			roundRect(ctx, x, y, x + cell - 2, y + cell - 2, hover ? CARD_HOVER : CARD);
 			if (isSelected) outline(ctx, x, y, x + cell - 2, y + cell - 2, ACCENT);
-			ctx.drawItem(stack(item), x + 3, y + 3);
-			String id = Registries.ITEM.getId(item).toString();
+			ctx.fakeItem(stack(item), x + 3, y + 3);
+			String id = BuiltInRegistries.ITEM.getKey(item).toString();
 			if (config.styles.containsKey(id) || config.hasAdjust(id)) {
 				fill(ctx, x + cell - 6, y + 2, x + cell - 4, y + 4, ACCENT);
 			}
@@ -478,38 +478,38 @@ public final class StudioScreen extends Screen {
 				selected = item;
 				bulkMode = false;
 				scroll.put("detail", 0);
-			}, item.getName().getString());
+			}, stack(item).getHoverName().getString());
 		}
 		ctx.disableScissor();
 	}
 
-	private void drawDetail(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawDetail(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x1 = detailX, y1 = bodyY + 2, x2 = detailX + detailW, y2 = footerY - 2;
 		roundRect(ctx, x1, y1, x2, y2, SIDE);
 		if (selected == null) {
-			ctx.drawText(textRenderer, "Pick an item", x1 + 8, y1 + 8, MUTED, false);
+			ctx.text(font, "Pick an item", x1 + 8, y1 + 8, MUTED, false);
 			return;
 		}
 		if (!ready()) {
-			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
+			ctx.text(font, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
 			return;
 		}
 		ItemInfo info = ItemInfo.of(selected);
 
 		// big icon + name
 		roundRect(ctx, x1 + 6, y1 + 6, x1 + 42, y1 + 42, CARD);
-		Matrix3x2fStack m = ctx.getMatrices();
+		Matrix3x2fStack m = ctx.pose();
 		m.pushMatrix();
 		m.translate(x1 + 8, y1 + 8);
 		m.scale(2f, 2f);
-		ctx.drawItem(stack(selected), 0, 0);
+		ctx.fakeItem(stack(selected), 0, 0);
 		m.popMatrix();
 		int textW = detailW - 54;
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(selected.getName().getString(), textW), x1 + 48, y1 + 10, TEXT, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(info.id, textW), x1 + 48, y1 + 22, MUTED, false);
+		ctx.text(font, font.plainSubstrByWidth(stack(selected).getHoverName().getString(), textW), x1 + 48, y1 + 10, TEXT, false);
+		ctx.text(font, font.plainSubstrByWidth(info.id, textW), x1 + 48, y1 + 22, MUTED, false);
 		String style = styleOf(selected);
 		String styleName = style == null ? "Default" : index.get(style) == null ? style + " (missing)" : index.get(style).displayName();
-		ctx.drawText(textRenderer, textRenderer.trimToWidth(styleName, textW), x1 + 48, y1 + 32, style == null ? MUTED : ACCENT, false);
+		ctx.text(font, font.plainSubstrByWidth(styleName, textW), x1 + 48, y1 + 32, style == null ? MUTED : ACCENT, false);
 
 		// tabs
 		int ty = y1 + 48;
@@ -542,7 +542,7 @@ public final class StudioScreen extends Screen {
 		return b.toString();
 	}
 
-	private void drawStyles(DrawContext ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
+	private void drawStyles(GuiGraphicsExtractor ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
 		List<Card> cards = new ArrayList<>();
 		String main = info.mainTexture;
 		String current = styleOf(selected);
@@ -618,15 +618,15 @@ public final class StudioScreen extends Screen {
 
 			int size = cardW - 8;
 			if (!drawPreview(ctx, card.imageKey, card.image, cx + 4, cy + 4, size)) {
-				Matrix3x2fStack m = ctx.getMatrices();
+				Matrix3x2fStack m = ctx.pose();
 				m.pushMatrix();
 				float scale = size / 16f;
 				m.translate(cx + 4, cy + 4);
 				m.scale(scale, scale);
-				ctx.drawItem(stack(selected), 0, 0);
+				ctx.fakeItem(stack(selected), 0, 0);
 				m.popMatrix();
 			}
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1,
+			ctx.text(font, font.plainSubstrByWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1,
 				on ? TEXT : MUTED, false);
 			if (on) {
 				fill(ctx, cx + cardW - 9, cy + 3, cx + cardW - 3, cy + 9, ACCENT);
@@ -641,12 +641,12 @@ public final class StudioScreen extends Screen {
 		}
 		int hy = top + rows * (cardH + gap) - off + 2;
 		if (noMatch) {
-			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
+			ctx.text(font, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
 		} else if (packs.isEmpty()) {
-			ctx.drawText(textRenderer, "None of your packs change this item.", x1 + 6, hy, MUTED, false);
-			ctx.drawText(textRenderer, "Add packs and press Rescan.", x1 + 6, hy + 10, MUTED, false);
+			ctx.text(font, "None of your packs change this item.", x1 + 6, hy, MUTED, false);
+			ctx.text(font, "Add packs and press Rescan.", x1 + 6, hy + 10, MUTED, false);
 		} else if (info.hasWornLook()) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth("Also changes how it looks when worn/used", innerW), x1 + 6, hy, MUTED, false);
+			ctx.text(font, font.plainSubstrByWidth("Also changes how it looks when worn/used", innerW), x1 + 6, hy, MUTED, false);
 		}
 		ctx.disableScissor();
 	}
@@ -657,7 +657,7 @@ public final class StudioScreen extends Screen {
 			if (info.mainTexture != null && pack.has(info.mainTexture)) return pack.read(info.mainTexture);
 		} catch (Exception ignored) {
 		}
-		String own = "assets/minecraft/textures/item/" + net.minecraft.util.Identifier.of(info.id).getPath() + ".png";
+		String own = "assets/minecraft/textures/item/" + net.minecraft.resources.Identifier.parse(info.id).getPath() + ".png";
 		try {
 			if (pack.has(own)) return pack.read(own);
 		} catch (Exception ignored) {
@@ -685,7 +685,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** Places and frames the pack search box at y. Returns the y where content below it starts. */
-	private int drawStyleSearch(DrawContext ctx, int x1, int y, int x2) {
+	private int drawStyleSearch(GuiGraphicsExtractor ctx, int x1, int y, int x2) {
 		styleSearch.visible = true;
 		styleSearch.setX(x1 + 10);
 		styleSearch.setY(y + 4);
@@ -709,19 +709,19 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** Draws the top square of a texture scaled to size. Returns false if there is no image. */
-	private boolean drawPreview(DrawContext ctx, String key, Supplier<byte[]> bytes, int x, int y, int size) {
+	private boolean drawPreview(GuiGraphicsExtractor ctx, String key, Supplier<byte[]> bytes, int x, int y, int size) {
 		PreviewTextures.Preview p = previews.get(key, bytes);
 		if (p == null) return false;
 		int square = Math.min(p.width(), p.height());
-		ctx.drawTexture(RenderPipelines.GUI_TEXTURED, p.id(), x, y, 0f, 0f, size, size, square, square, p.width(), p.height());
+		ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x, y, 0f, 0f, size, size, square, square, p.width(), p.height());
 		return true;
 	}
 
-	private void drawAdjust(DrawContext ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
+	private void drawAdjust(GuiGraphicsExtractor ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
 		// view chips, wrapping onto more rows if needed
 		int cx = x1 + 6, cy = top;
 		for (View v : View.values()) {
-			int w = textRenderer.getWidth(v.label) + 10;
+			int w = font.width(v.label) + 10;
 			if (cx + w > x2 - 6) {
 				cx = x1 + 6;
 				cy += 16;
@@ -730,7 +730,7 @@ public final class StudioScreen extends Screen {
 			boolean edited = config.getAdjust(info.id, v) != null && !config.getAdjust(info.id, v).isDefault();
 			boolean hover = inside(mouseX, mouseY, cx, cy, cx + w, cy + 13);
 			roundRect(ctx, cx, cy, cx + w, cy + 13, on ? ACCENT : hover ? CARD_HOVER : CARD);
-			ctx.drawText(textRenderer, v.label, cx + 5, cy + 3, on ? 0xFFFFFFFF : edited ? ACCENT : MUTED, false);
+			ctx.text(font, v.label, cx + 5, cy + 3, on ? 0xFFFFFFFF : edited ? ACCENT : MUTED, false);
 			final View target = v;
 			hits.add(new Hit(cx, cy, cx + w, cy + 13, () -> view = target, null, null));
 			cx += w + 3;
@@ -774,20 +774,20 @@ public final class StudioScreen extends Screen {
 			}, null);
 		}
 		if (y + 34 <= y2 - 2) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth("Right-click a slider to reset it", x2 - x1 - 12),
+			ctx.text(font, font.plainSubstrByWidth("Right-click a slider to reset it", x2 - x1 - 12),
 				x1 + 6, y + 22, MUTED, false);
 		}
 	}
 
-	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
+	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
 	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
 	                   float displayMul) {
 		float value = get.get();
 		boolean changedValue = Math.abs(value - def) > 1e-4f;
-		ctx.drawText(textRenderer, label, barX1, y, changedValue ? TEXT : MUTED, false);
+		ctx.text(font, label, barX1, y, changedValue ? TEXT : MUTED, false);
 		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
 			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
-		ctx.drawText(textRenderer, shown, barX2 - textRenderer.getWidth(shown), y, changedValue ? ACCENT : MUTED, false);
+		ctx.text(font, shown, barX2 - font.width(shown), y, changedValue ? ACCENT : MUTED, false);
 
 		int by = y + 11;
 		fill(ctx, barX1, by, barX2, by + 3, CARD_HOVER);
@@ -805,16 +805,16 @@ public final class StudioScreen extends Screen {
 		return y + 20;
 	}
 
-	private void drawBulk(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawBulk(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x1 = detailX, y1 = bodyY + 2, x2 = detailX + detailW, y2 = footerY - 2;
 		roundRect(ctx, x1, y1, x2, y2, SIDE);
 		if (!ready()) {
-			ctx.drawText(textRenderer, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
+			ctx.text(font, "Loading packs...", x1 + 8, y1 + 8, MUTED, false);
 			return;
 		}
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("One pack for all " + category.label, detailW - 12), x1 + 8, y1 + 8, TEXT, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("Click a pack to use it for every", detailW - 12), x1 + 8, y1 + 20, MUTED, false);
-		ctx.drawText(textRenderer, textRenderer.trimToWidth("item in this group that it has.", detailW - 12), x1 + 8, y1 + 30, MUTED, false);
+		ctx.text(font, font.plainSubstrByWidth("One pack for all " + category.label, detailW - 12), x1 + 8, y1 + 8, TEXT, false);
+		ctx.text(font, font.plainSubstrByWidth("MouseButtonEvent a pack to use it for every", detailW - 12), x1 + 8, y1 + 20, MUTED, false);
+		ctx.text(font, font.plainSubstrByWidth("item in this group that it has.", detailW - 12), x1 + 8, y1 + 30, MUTED, false);
 
 		List<Card> cards = new ArrayList<>();
 		Item first = category.items().isEmpty() ? null : category.items().get(0);
@@ -881,39 +881,39 @@ public final class StudioScreen extends Screen {
 			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, hover ? CARD_HOVER : CARD);
 			int size = cardW - 8;
 			if (!drawPreview(ctx, card.imageKey, card.image, cx + 4, cy + 4, size) && first != null) {
-				ctx.drawItem(stack(first), cx + cardW / 2 - 8, cy + cardW / 2 - 8);
+				ctx.fakeItem(stack(first), cx + cardW / 2 - 8, cy + cardW / 2 - 8);
 			}
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1, TEXT, false);
+			ctx.text(font, font.plainSubstrByWidth(card.name, cardW - 6), cx + 3, cy + cardW - 1, TEXT, false);
 			String sub = card.sourceId == null ? "reset" : card.sourceId.equals(VanillaSource.ID) ? "all items"
 				: counts.get(card.sourceId) + " item" + (counts.get(card.sourceId) == 1 ? "" : "s");
-			ctx.drawText(textRenderer, sub, cx + 3, cy + cardW + 9, MUTED, false);
+			ctx.text(font, sub, cx + 3, cy + cardW + 9, MUTED, false);
 			final String sourceId = card.sourceId;
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> useForCategory(sourceId), card.tooltip);
 		}
 		if (noMatch) {
 			int hy = top + rows * (cardH + gap) - off + 2;
-			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
+			ctx.text(font, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
 		} else if (noPacks) {
 			int hy = top + rows * (cardH + gap) - off + 2;
-			ctx.drawText(textRenderer, "None of your packs change", x1 + 6, hy, MUTED, false);
-			ctx.drawText(textRenderer, "items in this group.", x1 + 6, hy + 10, MUTED, false);
+			ctx.text(font, "None of your packs change", x1 + 6, hy, MUTED, false);
+			ctx.text(font, "items in this group.", x1 + 6, hy + 10, MUTED, false);
 		}
 		ctx.disableScissor();
 	}
 
-	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
+	private void drawFooter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, LINE);
 		int y = footerY + 4;
 		int right = px + pw - 6;
 
 		String applyLabel = pending > 0 ? "Apply (" + pending + ")" : "Apply";
-		int w = textRenderer.getWidth(applyLabel) + 16;
+		int w = font.width(applyLabel) + 16;
 		right -= w;
 		button(ctx, right, y, w, 15, applyLabel, true, mouseX, mouseY, this::apply,
 			"Build the pack and reload textures");
 
 		String auto = "Auto-apply: " + (config.applyInstantly ? "On" : "Off");
-		w = textRenderer.getWidth(auto) + 12;
+		w = font.width(auto) + 12;
 		right -= w + 4;
 		button(ctx, right, y, w, 15, auto, false, mouseX, mouseY, () -> {
 			config.applyInstantly = !config.applyInstantly;
@@ -923,43 +923,43 @@ public final class StudioScreen extends Screen {
 
 		boolean small = pw < 520;
 		String rescan = small ? "Rescan" : "Rescan packs";
-		w = textRenderer.getWidth(rescan) + 12;
+		w = font.width(rescan) + 12;
 		right -= w + 4;
 		button(ctx, right, y, w, 15, rescan, false, mouseX, mouseY, this::rescan,
 			"Look for new packs in the resourcepacks folder");
 
 		String folder = small ? "Folder" : "Packs folder";
-		w = textRenderer.getWidth(folder) + 12;
+		w = font.width(folder) + 12;
 		right -= w + 4;
 		button(ctx, right, y, w, 15, folder, false, mouseX, mouseY,
-			() -> Util.getOperatingSystem().open(client.getResourcePackDir()), "Open your resourcepacks folder");
+			() -> Util.getPlatform().openUri(minecraft.getResourcePackDirectory().toUri()), "Open your resourcepacks folder");
 
 		int statusW = right - (px + 10) - 6;
 		if (statusW > 20) {
-			ctx.drawText(textRenderer, textRenderer.trimToWidth(status, statusW), px + 10, y + 4, statusColor, false);
+			ctx.text(font, font.plainSubstrByWidth(status, statusW), px + 10, y + 4, statusColor, false);
 		}
 	}
 
 	// ------------------------------------------------------------------ small drawing helpers
 
-	private void button(DrawContext ctx, int x, int y, int w, int h, String label, boolean primary,
+	private void button(GuiGraphicsExtractor ctx, int x, int y, int w, int h, String label, boolean primary,
 	                    int mouseX, int mouseY, Runnable action, String tooltip) {
 		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + h);
 		int bg = primary ? (hover ? 0xFF9C82FF : ACCENT) : (hover ? CARD_HOVER : CARD);
 		roundRect(ctx, x, y, x + w, y + h, bg);
 		if (!primary) outline(ctx, x, y, x + w, y + h, LINE);
-		int tw = textRenderer.getWidth(label);
-		ctx.drawText(textRenderer, label, x + (w - tw) / 2, y + (h - 8) / 2, primary ? 0xFFFFFFFF : TEXT, false);
+		int tw = font.width(label);
+		ctx.text(font, label, x + (w - tw) / 2, y + (h - 8) / 2, primary ? 0xFFFFFFFF : TEXT, false);
 		hits.add(new Hit(x, y, x + w, y + h, action, tooltip, null));
 	}
 
-	private void tabButton(DrawContext ctx, int x, int y, int w, String label, boolean on,
+	private void tabButton(GuiGraphicsExtractor ctx, int x, int y, int w, String label, boolean on,
 	                       int mouseX, int mouseY, Runnable action) {
 		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + 15);
 		roundRect(ctx, x, y, x + w, y + 15, on ? CARD_HOVER : hover ? CARD : SIDE);
 		if (on) fill(ctx, x + 4, y + 13, x + w - 4, y + 15, ACCENT);
-		String text = textRenderer.trimToWidth(label, w - 6);
-		ctx.drawText(textRenderer, text, x + (w - textRenderer.getWidth(text)) / 2, y + 4, on ? TEXT : MUTED, false);
+		String text = font.plainSubstrByWidth(label, w - 6);
+		ctx.text(font, text, x + (w - font.width(text)) / 2, y + 4, on ? TEXT : MUTED, false);
 		hits.add(new Hit(x, y, x + w, y + 15, action, null, null));
 	}
 
@@ -982,12 +982,12 @@ public final class StudioScreen extends Screen {
 		return x >= x1 && x < x2 && y >= y1 && y < y2;
 	}
 
-	private static void fill(DrawContext ctx, int x1, int y1, int x2, int y2, int color) {
+	private static void fill(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
 		if (x2 > x1 && y2 > y1) ctx.fill(x1, y1, x2, y2, color);
 	}
 
 	/** Rectangle with 2px cut corners, drawn without overlapping fills so see-through colours stay even. */
-	private static void roundRect(DrawContext ctx, int x1, int y1, int x2, int y2, int color) {
+	private static void roundRect(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
 		if (x2 - x1 < 5 || y2 - y1 < 5) {
 			fill(ctx, x1, y1, x2, y2, color);
 			return;
@@ -999,7 +999,7 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1 + 2, y2 - 1, x2 - 2, y2, color);
 	}
 
-	private static void outline(DrawContext ctx, int x1, int y1, int x2, int y2, int color) {
+	private static void outline(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
 		fill(ctx, x1 + 2, y1, x2 - 2, y1 + 1, color);
 		fill(ctx, x1 + 2, y2 - 1, x2 - 2, y2, color);
 		fill(ctx, x1, y1 + 2, x1 + 1, y2 - 2, color);
@@ -1013,7 +1013,7 @@ public final class StudioScreen extends Screen {
 	// ------------------------------------------------------------------ input
 
 	@Override
-	public boolean mouseClicked(Click click, boolean doubled) {
+	public boolean mouseClicked(MouseButtonEvent click, boolean doubled) {
 		double x = click.x(), y = click.y();
 		if (search.isMouseOver(x, y) || styleSearch.isMouseOver(x, y)) {
 			return super.mouseClicked(click, doubled);
@@ -1043,7 +1043,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	@Override
-	public boolean mouseDragged(Click click, double offsetX, double offsetY) {
+	public boolean mouseDragged(MouseButtonEvent click, double offsetX, double offsetY) {
 		if (dragging != null) {
 			dragging.setFromMouse(click.x());
 			return true;
@@ -1052,7 +1052,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	@Override
-	public boolean mouseReleased(Click click) {
+	public boolean mouseReleased(MouseButtonEvent click) {
 		if (dragging != null) {
 			dragging = null;
 			changed(true);
@@ -1074,9 +1074,9 @@ public final class StudioScreen extends Screen {
 	}
 
 	@Override
-	public boolean keyPressed(KeyInput input) {
+	public boolean keyPressed(KeyEvent input) {
 		if (input.isEscape()) {
-			close();
+			onClose();
 			return true;
 		}
 		return super.keyPressed(input);

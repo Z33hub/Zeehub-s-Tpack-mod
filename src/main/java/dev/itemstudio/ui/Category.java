@@ -1,8 +1,8 @@
 package dev.itemstudio.ui;
 
-import net.minecraft.item.Item;
-import net.minecraft.item.Items;
-import net.minecraft.registry.Registries;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,9 +45,9 @@ public enum Category {
 	public List<Item> items() {
 		if (cached == null) {
 			List<Item> list = new ArrayList<>();
-			for (Item item : Registries.ITEM) {
+			for (Item item : BuiltInRegistries.ITEM) {
 				if (item == Items.AIR) continue;
-				if (match.test(Registries.ITEM.getId(item).getPath())) list.add(item);
+				if (match.test(BuiltInRegistries.ITEM.getKey(item).getPath())) list.add(item);
 			}
 			cached = list;
 		}

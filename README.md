@@ -1,6 +1,6 @@
 # Item Studio
 
-A Fabric client mod for Minecraft 1.21.11. Pick a texture and model for each item from the
+A Fabric client mod for Minecraft 26.2 (the `main` branch is the 1.21.11 version). Pick a texture and model for each item from the
 resource packs you already have, and change each item's size, position and rotation.
 
 ## Use
@@ -21,4 +21,4 @@ Requires Fabric API.
 
 ## Build
 
-`./gradlew build` with Java 21. The jar is in `build/libs`. Pushing to GitHub also builds it (Actions tab).
+`./gradlew build` with Java 25. The jar is in `build/libs`. Pushing to GitHub also builds it (Actions tab).

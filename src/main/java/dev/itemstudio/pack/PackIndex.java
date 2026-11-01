@@ -1,9 +1,9 @@
 package dev.itemstudio.pack;
 
 import dev.itemstudio.ItemStudioClient;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.item.Item;
-import net.minecraft.registry.Registries;
+import net.minecraft.client.Minecraft;
+import net.minecraft.world.item.Item;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -46,7 +46,7 @@ public final class PackIndex {
 	public static PackIndex scan() {
 		PackIndex index = new PackIndex();
 		index.byId.put(VanillaSource.ID, index.vanilla);
-		Path dir = MinecraftClient.getInstance().getResourcePackDir();
+		Path dir = Minecraft.getInstance().getResourcePackDirectory();
 		if (Files.isDirectory(dir)) {
 			try (Stream<Path> list = Files.list(dir)) {
 				list.sorted(Comparator.comparing(p -> p.getFileName().toString().toLowerCase()))
@@ -63,9 +63,9 @@ public final class PackIndex {
 			}
 		}
 		Set<String> itemPaths = new HashSet<>();
-		for (Item item : Registries.ITEM) {
-			if (Registries.ITEM.getId(item).getNamespace().equals("minecraft")) {
-				itemPaths.add(Registries.ITEM.getId(item).getPath());
+		for (Item item : BuiltInRegistries.ITEM) {
+			if (BuiltInRegistries.ITEM.getKey(item).getNamespace().equals("minecraft")) {
+				itemPaths.add(BuiltInRegistries.ITEM.getKey(item).getPath());
 			}
 		}
 		for (FilePackSource pack : index.packs) {

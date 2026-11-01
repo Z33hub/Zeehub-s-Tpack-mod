@@ -2,9 +2,9 @@ package dev.itemstudio.pack;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.resource.Resource;
-import net.minecraft.util.Identifier;
+import net.minecraft.client.Minecraft;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.resources.Identifier;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -24,11 +24,11 @@ public final class Resources {
 		if (!path.startsWith("assets/")) return null;
 		int slash = path.indexOf('/', 7);
 		if (slash < 0) return null;
-		return Identifier.tryParse(path.substring(7, slash), path.substring(slash + 1));
+		return Identifier.tryBuild(path.substring(7, slash), path.substring(slash + 1));
 	}
 
 	private static boolean isGenerated(Resource resource) {
-		String packId = resource.getPackId();
+		String packId = resource.sourcePackId();
 		return packId != null && packId.contains(GENERATED_FOLDER);
 	}
 
@@ -37,11 +37,11 @@ public final class Resources {
 		Identifier id = toId(path);
 		if (id == null) return null;
 		try {
-			List<Resource> all = MinecraftClient.getInstance().getResourceManager().getAllResources(id);
+			List<Resource> all = Minecraft.getInstance().getResourceManager().getResourceStack(id);
 			for (int i = all.size() - 1; i >= 0; i--) {
 				Resource resource = all.get(i);
 				if (isGenerated(resource)) continue;
-				try (InputStream in = resource.getInputStream()) {
+				try (InputStream in = resource.open()) {
 					return in.readAllBytes();
 				}
 			}
@@ -55,9 +55,9 @@ public final class Resources {
 		Identifier id = toId(path);
 		if (id == null) return null;
 		try {
-			for (Resource resource : MinecraftClient.getInstance().getResourceManager().getAllResources(id)) {
-				if ("vanilla".equals(resource.getPackId())) {
-					try (InputStream in = resource.getInputStream()) {
+			for (Resource resource : Minecraft.getInstance().getResourceManager().getResourceStack(id)) {
+				if ("vanilla".equals(resource.sourcePackId())) {
+					try (InputStream in = resource.open()) {
 						return in.readAllBytes();
 					}
 				}

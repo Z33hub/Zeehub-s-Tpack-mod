@@ -2,8 +2,8 @@ package dev.itemstudio.pack;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import net.minecraft.item.Item;
-import net.minecraft.registry.Registries;
+import net.minecraft.world.item.Item;
+import net.minecraft.core.registries.BuiltInRegistries;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,7 +32,7 @@ public final class ItemInfo {
 
 	private ItemInfo(Item item) {
 		this.item = item;
-		this.id = Registries.ITEM.getId(item).toString();
+		this.id = BuiltInRegistries.ITEM.getKey(item).toString();
 		JsonElement def = Resources.parse(Resources.readVanilla(Refs.itemDefFile(id)));
 		Refs.collectDefModels(def, models);
 
@@ -51,7 +51,7 @@ public final class ItemInfo {
 	}
 
 	public static ItemInfo of(Item item) {
-		String key = Registries.ITEM.getId(item).toString();
+		String key = BuiltInRegistries.ITEM.getKey(item).toString();
 		return CACHE.computeIfAbsent(key, k -> new ItemInfo(item));
 	}
 

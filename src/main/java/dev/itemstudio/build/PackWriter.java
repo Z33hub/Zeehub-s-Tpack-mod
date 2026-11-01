@@ -2,8 +2,8 @@ package dev.itemstudio.build;
 
 import dev.itemstudio.ItemStudioClient;
 import dev.itemstudio.pack.Resources;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.resource.ResourcePackManager;
+import net.minecraft.client.Minecraft;
+import net.minecraft.server.packs.repository.PackRepository;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,7 +34,7 @@ public final class PackWriter {
 	}
 
 	public static Path folder() {
-		return MinecraftClient.getInstance().getResourcePackDir().resolve(Resources.GENERATED_FOLDER);
+		return Minecraft.getInstance().getResourcePackDirectory().resolve(Resources.GENERATED_FOLDER);
 	}
 
 	/** Replaces the generated pack's files. Returns false if writing failed. */
@@ -66,21 +66,21 @@ public final class PackWriter {
 	 * The returned future finishes when the reload is done.
 	 */
 	public static CompletableFuture<Void> enableAndReload(boolean hasFiles) {
-		MinecraftClient client = MinecraftClient.getInstance();
-		ResourcePackManager manager = client.getResourcePackManager();
-		manager.scanPacks();
+		Minecraft client = Minecraft.getInstance();
+		PackRepository manager = client.getResourcePackRepository();
+		manager.reload();
 
-		List<String> enabled = new ArrayList<>(manager.getEnabledIds());
+		List<String> enabled = new ArrayList<>(manager.getSelectedIds());
 		enabled.remove(Resources.GENERATED_PACK_ID);
-		if (hasFiles && manager.getIds().contains(Resources.GENERATED_PACK_ID)) {
+		if (hasFiles && manager.getAvailableIds().contains(Resources.GENERATED_PACK_ID)) {
 			enabled.add(Resources.GENERATED_PACK_ID); // last = highest priority
 		}
-		manager.setEnabledProfiles(enabled);
+		manager.setSelected(enabled);
 
 		List<String> before = new ArrayList<>(client.options.resourcePacks);
-		client.options.refreshResourcePacks(manager); // saves options and reloads if the list changed
+		client.options.updateResourcePacks(manager); // saves options and reloads if the list changed
 		if (before.equals(client.options.resourcePacks)) {
-			return client.reloadResources();
+			return client.reloadResourcePacks();
 		}
 		// refreshResourcePacks already started a reload; wait for it by queueing behind it.
 		return CompletableFuture.completedFuture(null);

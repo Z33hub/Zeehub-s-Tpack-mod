@@ -14,9 +14,9 @@ import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
 import dev.itemstudio.pack.Refs;
 import dev.itemstudio.pack.Resources;
-import net.minecraft.item.Item;
-import net.minecraft.registry.Registries;
-import net.minecraft.util.Identifier;
+import net.minecraft.world.item.Item;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -68,8 +68,8 @@ public final class PackBuilder {
 		items.addAll(config.adjust.keySet());
 		for (String itemId : items) {
 			Identifier id = Identifier.tryParse(itemId);
-			if (id == null || !Registries.ITEM.containsId(id)) continue;
-			Item item = Registries.ITEM.get(id);
+			if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) continue;
+			Item item = BuiltInRegistries.ITEM.getValue(id);
 			try {
 				buildItem(ItemInfo.of(item));
 			} catch (Exception e) {
