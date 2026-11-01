@@ -100,6 +100,9 @@ public final class StudioScreen extends Screen {
 	private int statusColor = MUTED;
 	private Slider dragging;
 	private TextFieldWidget search;
+	/** Filters the style cards by pack name. */
+	private TextFieldWidget styleSearch;
+	private String styleQuery = "";
 
 	// layout
 	private int px, py, pw, ph, bodyY, bodyH, sideW, gridX, gridW, detailX, detailW, footerY;
@@ -144,6 +147,18 @@ public final class StudioScreen extends Screen {
 			bulkMode = false;
 		});
 		addDrawableChild(search);
+
+		styleSearch = new TextFieldWidget(textRenderer, detailX + 10, bodyY + 74, detailW - 24, 10, Text.literal("Search packs"));
+		styleSearch.setDrawsBackground(false);
+		styleSearch.setMaxLength(50);
+		styleSearch.setText(styleQuery);
+		styleSearch.setPlaceholder(Text.literal("Search packs"));
+		styleSearch.setChangedListener(text -> {
+			styleQuery = text.trim().toLowerCase(Locale.ROOT);
+			scroll.put("detail", 0);
+		});
+		styleSearch.visible = false;
+		addDrawableChild(styleSearch);
 	}
 
 	@Override
@@ -333,6 +348,7 @@ public final class StudioScreen extends Screen {
 		drawHeader(ctx, mouseX, mouseY);
 		drawSidebar(ctx, mouseX, mouseY);
 		drawGrid(ctx, mouseX, mouseY);
+		styleSearch.visible = false; // shown again below if the current panel has it
 		if (bulkMode && query.isEmpty() && category != Category.ALL) {
 			drawBulk(ctx, mouseX, mouseY);
 		} else {
@@ -567,8 +583,12 @@ public final class StudioScreen extends Screen {
 			cards.add(new Card(shown.id(), ids, name, tip, () -> previewBytes(preview, info), shown.id() + "|" + info.id));
 		}
 
+		top = drawStyleSearch(ctx, x1, top, x2);
+		cards = filterCards(cards);
+		boolean noMatch = cards.isEmpty();
+
 		int hintH = 0;
-		if (packs.isEmpty()) {
+		if (packs.isEmpty() || noMatch) {
 			hintH = 22;
 		} else if (info.hasWornLook()) {
 			hintH = 12;
@@ -620,7 +640,9 @@ public final class StudioScreen extends Screen {
 			}, card.tooltip);
 		}
 		int hy = top + rows * (cardH + gap) - off + 2;
-		if (packs.isEmpty()) {
+		if (noMatch) {
+			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
+		} else if (packs.isEmpty()) {
 			ctx.drawText(textRenderer, "None of your packs change this item.", x1 + 6, hy, MUTED, false);
 			ctx.drawText(textRenderer, "Add packs and press Rescan.", x1 + 6, hy + 10, MUTED, false);
 		} else if (info.hasWornLook()) {
@@ -660,6 +682,30 @@ public final class StudioScreen extends Screen {
 			}
 		}
 		return null;
+	}
+
+	/** Places and frames the pack search box at y. Returns the y where content below it starts. */
+	private int drawStyleSearch(DrawContext ctx, int x1, int y, int x2) {
+		styleSearch.visible = true;
+		styleSearch.setX(x1 + 10);
+		styleSearch.setY(y + 4);
+		styleSearch.setWidth(x2 - x1 - 22);
+		int bx1 = x1 + 6, by1 = y, bx2 = x2 - 6, by2 = y + 16;
+		boolean focused = styleSearch.isFocused();
+		roundRect(ctx, bx1, by1, bx2, by2, focused ? CARD_HOVER : CARD);
+		outline(ctx, bx1, by1, bx2, by2, focused ? ACCENT : LINE);
+		return y + 20;
+	}
+
+	/** Cards whose pack names match the pack search. */
+	private List<Card> filterCards(List<Card> cards) {
+		if (styleQuery.isEmpty()) return cards;
+		List<Card> list = new ArrayList<>();
+		for (Card card : cards) {
+			String text = (card.name + " " + card.tooltip).toLowerCase(Locale.ROOT);
+			if (text.contains(styleQuery)) list.add(card);
+		}
+		return list;
 	}
 
 	/** Draws the top square of a texture scaled to size. Returns false if there is no image. */
@@ -811,14 +857,17 @@ public final class StudioScreen extends Screen {
 			cards.add(new Card(pack.id(), ids, name, tip, () -> previewBytes(pack, previewInfo), pack.id() + "|" + previewInfo.id));
 		}
 
-		int top = y1 + 44, bottom = y2 - 4;
+		boolean noPacks = cards.size() == 2;
+		int top = drawStyleSearch(ctx, x1, y1 + 42, x2), bottom = y2 - 4;
+		cards = filterCards(cards);
+		boolean noMatch = cards.isEmpty();
 		int innerW = x2 - x1 - 12;
 		int cols = Math.max(2, innerW / 58);
 		int gap = 4;
 		int cardW = (innerW - gap * (cols - 1)) / cols;
 		int cardH = cardW + 22;
 		int rows = (cards.size() + cols - 1) / cols;
-		int content = rows * (cardH + gap) + (cards.size() == 2 ? 24 : 0);
+		int content = rows * (cardH + gap) + (noPacks || noMatch ? 24 : 0);
 		int off = scrollOf("detail", content, bottom - top);
 		scrollAreas.add(new ScrollArea("detail", x1, top, x2, bottom, Math.max(0, content - (bottom - top))));
 
@@ -841,7 +890,10 @@ public final class StudioScreen extends Screen {
 			final String sourceId = card.sourceId;
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> useForCategory(sourceId), card.tooltip);
 		}
-		if (cards.size() == 2) {
+		if (noMatch) {
+			int hy = top + rows * (cardH + gap) - off + 2;
+			ctx.drawText(textRenderer, "No packs match \"" + styleQuery + "\"", x1 + 6, hy, MUTED, false);
+		} else if (noPacks) {
 			int hy = top + rows * (cardH + gap) - off + 2;
 			ctx.drawText(textRenderer, "None of your packs change", x1 + 6, hy, MUTED, false);
 			ctx.drawText(textRenderer, "items in this group.", x1 + 6, hy + 10, MUTED, false);
@@ -963,11 +1015,12 @@ public final class StudioScreen extends Screen {
 	@Override
 	public boolean mouseClicked(Click click, boolean doubled) {
 		double x = click.x(), y = click.y();
-		if (search.isMouseOver(x, y)) {
+		if (search.isMouseOver(x, y) || styleSearch.isMouseOver(x, y)) {
 			return super.mouseClicked(click, doubled);
 		}
 		setFocused(null);
 		search.setFocused(false);
+		styleSearch.setFocused(false);
 		for (int i = hits.size() - 1; i >= 0; i--) {
 			Hit hit = hits.get(i);
 			if (!hit.contains(x, y)) continue;
