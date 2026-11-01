@@ -29,6 +29,11 @@ public final class PackIndex {
 	private final Map<String, String> fingerprintCache = new HashMap<>();
 	private final Map<String, Boolean> sameAsVanillaCache = new HashMap<>();
 	private final Map<String, Boolean> sameAsBelowCache = new HashMap<>();
+	/** Per pack: HUD part -> its files in that pack (lower-case paths, .png only). */
+	private final Map<String, Map<HudElement, List<String>>> hudFiles = new HashMap<>();
+	private final Map<String, String> hudFingerprintCache = new HashMap<>();
+	private final Map<String, Boolean> hudSameAsBelowCache = new HashMap<>();
+	private final Map<HudElement, Boolean> hudBelowIsVanillaCache = new HashMap<>();
 
 	/** The files a source has for one item. */
 	/**
@@ -70,6 +75,14 @@ public final class PackIndex {
 		}
 		for (FilePackSource pack : index.packs) {
 			index.namedTextures.put(pack.id(), matchNamedTextures(pack, itemPaths));
+			Map<HudElement, List<String>> hud = new HashMap<>();
+			for (String path : pack.paths()) {
+				String lower = path.toLowerCase();
+				HudElement element = HudElement.of(lower);
+				if (element != null) hud.computeIfAbsent(element, k -> new ArrayList<>()).add(lower);
+			}
+			hud.values().forEach(java.util.Collections::sort);
+			index.hudFiles.put(pack.id(), hud);
 		}
 		return index;
 	}
@@ -263,6 +276,90 @@ public final class PackIndex {
 			if (parent != null) addModelFiles(source, parent, files, depth + 1);
 		} catch (Exception ignored) {
 		}
+	}
+
+	// ---------------------------------------------------------------- HUD parts
+
+	/** Every file name any scanned pack uses for a HUD part, plus its preview file. */
+	public List<String> hudAllFiles(HudElement element) {
+		Set<String> all = new java.util.TreeSet<>();
+		all.add(element.preview);
+		for (Map<HudElement, List<String>> map : hudFiles.values()) {
+			List<String> files = map.get(element);
+			if (files != null) all.addAll(files);
+		}
+		return new ArrayList<>(all);
+	}
+
+	/** The files a source has for a HUD part. For vanilla: the game's own versions of every known file. */
+	public List<String> hudFiles(PackSource source, HudElement element) {
+		if (source instanceof VanillaSource) {
+			List<String> list = new ArrayList<>();
+			for (String file : hudAllFiles(element)) {
+				if (source.has(file)) list.add(file);
+			}
+			return list;
+		}
+		Map<HudElement, List<String>> map = hudFiles.get(source.id());
+		List<String> files = map == null ? null : map.get(element);
+		return files == null ? List.of() : files;
+	}
+
+	public List<FilePackSource> packsForHud(HudElement element) {
+		List<FilePackSource> list = new ArrayList<>();
+		for (FilePackSource pack : packs) {
+			if (!hudFiles(pack, element).isEmpty()) list.add(pack);
+		}
+		return list;
+	}
+
+	/** Same idea as fingerprint(): packs with identical files for a HUD part look the same. */
+	public String hudFingerprint(PackSource source, HudElement element) {
+		String key = source.id() + "|" + element.name();
+		String cached = hudFingerprintCache.get(key);
+		if (cached != null) return cached;
+		String result;
+		try {
+			java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-1");
+			for (String file : hudFiles(source, element)) {
+				digest.update(file.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+				digest.update((byte) 0);
+				digest.update(source.read(file));
+				if (source.has(file + ".mcmeta")) digest.update(source.read(file + ".mcmeta"));
+				digest.update((byte) 1);
+			}
+			result = java.util.HexFormat.of().formatHex(digest.digest());
+		} catch (Exception e) {
+			result = "unique:" + source.id();
+		}
+		hudFingerprintCache.put(key, result);
+		return result;
+	}
+
+	/** True when a pack's files for a HUD part are exactly what the game already uses. */
+	public boolean hudSameAsBelow(PackSource source, HudElement element) {
+		return hudSameAsBelowCache.computeIfAbsent(source.id() + "|" + element.name(), k -> {
+			List<String> files = hudFiles(source, element);
+			if (files.isEmpty()) return false;
+			try {
+				for (String file : files) {
+					if (!java.util.Arrays.equals(source.read(file), Resources.readBelow(file))) return false;
+				}
+				return true;
+			} catch (Exception e) {
+				return false;
+			}
+		});
+	}
+
+	/** True when no turned-on pack changes this HUD part. */
+	public boolean hudBelowIsVanilla(HudElement element) {
+		return hudBelowIsVanillaCache.computeIfAbsent(element, e -> {
+			for (String file : hudAllFiles(e)) {
+				if (!java.util.Arrays.equals(Resources.readBelow(file), Resources.readVanilla(file))) return false;
+			}
+			return true;
+		});
 	}
 
 	public void close() {

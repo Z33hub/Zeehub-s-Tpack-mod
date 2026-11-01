@@ -29,6 +29,7 @@ public enum Category {
 		"water_bucket", "fishing_rod", "rail", "detector_rail", "activator_rail", "powered_rail").contains(p)),
 	TOOLS("Other tools", Items.DIAMOND_SHOVEL, p -> p.endsWith("_shovel") || p.endsWith("_hoe")
 		|| Set.of("shears", "brush", "spyglass", "clock", "compass", "recovery_compass").contains(p)),
+	HUD("HUD", Items.RED_DYE, p -> false),
 	ALL("All items", Items.CHEST, p -> true);
 
 	public final String label;
