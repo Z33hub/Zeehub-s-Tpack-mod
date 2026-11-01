@@ -21,6 +21,8 @@ public final class ItemInfo {
 	public final String id;
 	/** Models the vanilla item definition points at, e.g. minecraft:item/bow and minecraft:item/bow_pulling_0. */
 	public final List<String> models = new ArrayList<>();
+	/** Every model in the vanilla chains, parents included (item/handheld, item/handheld_mace...). */
+	public final Set<String> chainModels = new LinkedHashSet<>();
 	/** Texture files (assets/...png) used by the vanilla models, plus entity textures that belong to the item. */
 	public final Set<String> textures = new LinkedHashSet<>();
 	/** Entity/armor textures that are not in the item models but belong to this item. */
@@ -59,6 +61,7 @@ public final class ItemInfo {
 
 	private void collectTextures(String modelRef, Set<String> seen, int depth) {
 		if (depth > 16 || !seen.add(modelRef)) return;
+		chainModels.add(modelRef);
 		JsonElement json = Resources.parse(Resources.readVanilla(Refs.modelFile(modelRef)));
 		if (json == null || !json.isJsonObject()) return;
 		JsonObject model = json.getAsJsonObject();

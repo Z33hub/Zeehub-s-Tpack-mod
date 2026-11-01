@@ -246,15 +246,18 @@ public final class PackBuilder {
 		private String model(String ref, int depth) {
 			if (depth > 32) return null;
 			String file = Refs.modelFile(ref);
-			if (!source.has(file)) return null;
 			String done = copiedModels.get(ref);
 			if (done != null) return done;
+			// Copy the model if the pack has it, or if the pack changes one of its parents
+			// (e.g. no mace.json but its own item/handheld_mace.json that sets the size in hand).
+			boolean inPack = source.has(file);
+			if (!inPack && !parentInPack(ref, depth)) return null;
 
 			String newRef = NS + ":" + source.tag() + "/" + Refs.clean(Refs.namespace(ref) + "/" + Refs.path(ref));
 			copiedModels.put(ref, newRef);
 			JsonElement json;
 			try {
-				json = Resources.parse(source.read(file));
+				json = Resources.parse(inPack ? source.read(file) : Resources.readBelow(file));
 			} catch (Exception e) {
 				json = null;
 			}
@@ -290,6 +293,19 @@ public final class PackBuilder {
 			}
 			put(Refs.modelFile(newRef), model);
 			return newRef;
+		}
+
+		/** True if a model's parent chain (as the game has it now) reaches a model this pack changes. */
+		private boolean parentInPack(String ref, int depth) {
+			String current = ref;
+			for (int d = depth; current != null && d < 32; d++) {
+				JsonElement json = Resources.parse(Resources.readBelow(Refs.modelFile(current)));
+				if (json == null || !json.isJsonObject()) return false;
+				current = Refs.parentOf(json.getAsJsonObject());
+				if (current == null || current.startsWith("minecraft:builtin/")) return false;
+				if (source.has(Refs.modelFile(current))) return true;
+			}
+			return false;
 		}
 
 		/**

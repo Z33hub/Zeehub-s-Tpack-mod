@@ -31,9 +31,15 @@ public final class PackIndex {
 	private final Map<String, Boolean> sameAsBelowCache = new HashMap<>();
 
 	/** The files a source has for one item. */
-	public record Provided(boolean itemDef, List<String> models, List<String> textures) {
+	/**
+	 * The files a source has for one item. parentModels are shared parent models the pack changes (like
+	 * item/handheld, which sets how big tools look in your hand); they count for comparing and copying, and make
+	 * the pack show up for the item only when the parent is clearly about that item (item/handheld_mace for a mace).
+	 */
+	public record Provided(boolean itemDef, List<String> models, List<String> parentModels, boolean ownParent,
+	                       List<String> textures) {
 		public boolean any() {
-			return itemDef || !models.isEmpty() || !textures.isEmpty();
+			return itemDef || !models.isEmpty() || ownParent || !textures.isEmpty();
 		}
 	}
 
@@ -132,7 +138,16 @@ public final class PackIndex {
 		if (named != null && named.containsKey(info.id)) {
 			textures.addAll(named.get(info.id));
 		}
-		Provided provided = new Provided(def, models, new ArrayList<>(textures));
+		List<String> parents = new ArrayList<>();
+		boolean ownParent = false;
+		String itemName = Refs.path(info.id);
+		for (String model : info.chainModels) {
+			if (info.models.contains(model) || !source.has(Refs.modelFile(model))) continue;
+			parents.add(model);
+			String last = Refs.path(model).substring(Refs.path(model).lastIndexOf('/') + 1);
+			if (last.contains(itemName)) ownParent = true;
+		}
+		Provided provided = new Provided(def, models, parents, ownParent, new ArrayList<>(textures));
 		providedCache.put(key, provided);
 		return provided;
 	}
@@ -192,6 +207,7 @@ public final class PackIndex {
 			for (String model : defModels) addModelFiles(source, model, files, 0);
 		}
 		for (String model : provided.models()) addModelFiles(source, model, files, 0);
+		for (String model : provided.parentModels()) addModelFiles(source, model, files, 0);
 		files.addAll(provided.textures());
 		return files;
 	}
