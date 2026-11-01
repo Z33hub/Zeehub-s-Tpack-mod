@@ -91,7 +91,11 @@ public final class StudioScreen extends Screen {
 	private View view = View.FIRST_PERSON;
 	private boolean bulkMode;
 	private String query = "";
+	/** Number of items that differ from what was last applied. */
 	private int pending;
+	/** Item id -> its saved choices at the last apply, to work out what is still waiting. */
+	private Map<String, String> applied;
+	private static final com.google.gson.Gson SNAPSHOT_GSON = new com.google.gson.Gson();
 	private String status = "";
 	private int statusColor = MUTED;
 	private Slider dragging;
@@ -112,6 +116,7 @@ public final class StudioScreen extends Screen {
 		if (index == null && loading == null) {
 			startScan("Loading packs...");
 		}
+		if (applied == null) applied = snapshot();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 
 		px = 6;
@@ -203,14 +208,40 @@ public final class StudioScreen extends Screen {
 		statusColor = color;
 	}
 
+	/** Each item's current choices (style + size/position) as text, so two states can be compared. */
+	private Map<String, String> snapshot() {
+		config.cleanUp();
+		Map<String, String> map = new HashMap<>();
+		java.util.Set<String> ids = new java.util.HashSet<>(config.styles.keySet());
+		ids.addAll(config.adjust.keySet());
+		for (String id : ids) {
+			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)));
+		}
+		return map;
+	}
+
+	/** Counts items whose choices differ from the last apply. Picking A, then B, then C for one item is 1. */
+	private int countPending() {
+		Map<String, String> now = snapshot();
+		java.util.Set<String> ids = new java.util.HashSet<>(now.keySet());
+		ids.addAll(applied.keySet());
+		int count = 0;
+		for (String id : ids) {
+			if (!java.util.Objects.equals(now.get(id), applied.get(id))) count++;
+		}
+		return count;
+	}
+
 	private void changed(boolean finished) {
-		pending++;
 		config.cleanUp();
 		config.save();
-		if (finished && config.applyInstantly) {
+		pending = countPending();
+		if (pending == 0) {
+			setStatus("Nothing waiting - matches what's applied", MUTED);
+		} else if (finished && config.applyInstantly) {
 			apply();
 		} else {
-			setStatus(pending + " change" + (pending == 1 ? "" : "s") + " waiting - press Apply", WARN);
+			setStatus(pending + " item" + (pending == 1 ? "" : "s") + " changed - press Apply", WARN);
 		}
 	}
 
@@ -223,6 +254,7 @@ public final class StudioScreen extends Screen {
 			return;
 		}
 		pending = 0;
+		applied = snapshot();
 		if (builder.problems().isEmpty()) {
 			setStatus("Applied", GOOD);
 		} else {
@@ -268,9 +300,6 @@ public final class StudioScreen extends Screen {
 			}
 		}
 		changed(true);
-		if (!config.applyInstantly) {
-			setStatus(count + " item(s) changed - press Apply", WARN);
-		}
 	}
 
 	private ItemStack stack(Item item) {
