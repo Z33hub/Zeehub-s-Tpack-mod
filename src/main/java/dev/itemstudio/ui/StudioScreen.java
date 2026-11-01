@@ -7,7 +7,7 @@ import dev.itemstudio.View;
 import dev.itemstudio.build.PackBuilder;
 import dev.itemstudio.build.PackWriter;
 import dev.itemstudio.pack.FilePackSource;
-import dev.itemstudio.pack.HudElement;
+import dev.itemstudio.pack.TexturePart;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
@@ -106,7 +106,8 @@ public final class StudioScreen extends Screen {
 	private CompletableFuture<PackIndex> loading;
 	private Category category = Category.SWORDS;
 	private Item selected;
-	private HudElement selectedHud = HudElement.HEARTS;
+	/** The selected part in each texture-part category (HUD, particles). */
+	private final Map<Category, TexturePart> selectedPart = new HashMap<>();
 	private View view = View.FIRST_PERSON;
 	private Filter filter = Filter.ALL;
 	private boolean bulkMode;
@@ -234,8 +235,17 @@ public final class StudioScreen extends Screen {
 		ctx.text(font, styled(s, true), x, y, color, false);
 	}
 
-	/** Smaller text (75%) for hints and sub-labels. */
+	/** True when the menu uses Minecraft's pixel font (the default). Pixel text is never shrunk: it turns blotchy. */
+	private boolean pixelFont() {
+		return !config.customFont;
+	}
+
+	/** Hints and sub-labels: 75% with the custom font, full size with Minecraft's font. */
 	private void small(GuiGraphicsExtractor ctx, String s, int x, int y, int color) {
+		if (pixelFont()) {
+			ctx.text(font, styled(s, false), x, y, color, false);
+			return;
+		}
 		Matrix3x2fStack m = ctx.pose();
 		m.pushMatrix();
 		m.translate(x, y);
@@ -245,11 +255,50 @@ public final class StudioScreen extends Screen {
 	}
 
 	private int smallW(String s) {
-		return Math.round(textW(s) * 0.75f);
+		return pixelFont() ? textW(s) : Math.round(textW(s) * 0.75f);
 	}
 
 	private String smallTrim(String s, int max) {
-		return trim(s, Math.round(max / 0.75f));
+		return pixelFont() ? trim(s, max) : trim(s, Math.round(max / 0.75f));
+	}
+
+	/** Height of one line of small text. */
+	private int smallH() {
+		return pixelFont() ? 10 : 8;
+	}
+
+	/** Small text wrapped to a width. Returns the y below the last line. */
+	private int smallWrapped(GuiGraphicsExtractor ctx, String s, int x, int y, int maxW, int color) {
+		StringBuilder line = new StringBuilder();
+		for (String word : s.split(" ")) {
+			String next = line.length() == 0 ? word : line + " " + word;
+			if (line.length() > 0 && smallW(next) > maxW) {
+				small(ctx, line.toString(), x, y, color);
+				y += smallH();
+				line.setLength(0);
+				line.append(word);
+			} else {
+				line.setLength(0);
+				line.append(next);
+			}
+		}
+		if (line.length() > 0) {
+			small(ctx, smallTrim(line.toString(), maxW), x, y, color);
+			y += smallH();
+		}
+		return y;
+	}
+
+	/** Short names for the view buttons, used with the wider pixel font. */
+	private static String shortLabel(View v) {
+		return switch (v) {
+			case FIRST_PERSON -> "1st";
+			case THIRD_PERSON -> "3rd";
+			case INVENTORY -> "Inv";
+			case GROUND -> "Drop";
+			case FRAME -> "Frame";
+			case HEAD -> "Head";
+		};
 	}
 
 	// ------------------------------------------------------------------ packs / state
@@ -350,9 +399,9 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** Something that can be styled: an item, or a part of the HUD. */
-	private record Target(String key, Item item, HudElement hud) {
-		boolean isHud() {
-			return hud != null;
+	private record Target(String key, Item item, TexturePart part) {
+		boolean isPart() {
+			return part != null;
 		}
 	}
 
@@ -360,25 +409,25 @@ public final class StudioScreen extends Screen {
 		return new Target(BuiltInRegistries.ITEM.getKey(item).toString(), item, null);
 	}
 
-	private Target hudTarget(HudElement element) {
+	private Target partTarget(TexturePart element) {
 		return new Target(element.key(), null, element);
 	}
 
-	private boolean hudMode() {
-		return category == Category.HUD && query.isEmpty();
+	private boolean partMode() {
+		return !category.parts().isEmpty() && query.isEmpty();
 	}
 
 	/** The item or HUD part shown in the gallery and on the right. */
 	private Target current() {
-		if (hudMode()) return hudTarget(selectedHud);
+		if (partMode()) return partTarget(selectedPart.getOrDefault(category, category.parts().get(0)));
 		return selected == null ? null : itemTarget(selected);
 	}
 
 	/** The tiles in the row at the top. */
 	private List<Target> tiles() {
 		List<Target> list = new ArrayList<>();
-		if (hudMode()) {
-			for (HudElement e : HudElement.values()) list.add(hudTarget(e));
+		if (partMode()) {
+			for (TexturePart e : category.parts()) list.add(partTarget(e));
 		} else {
 			for (Item item : gridItems()) list.add(itemTarget(item));
 		}
@@ -388,8 +437,8 @@ public final class StudioScreen extends Screen {
 	/** Everything "One pack for all" works on. */
 	private List<Target> groupTargets() {
 		List<Target> list = new ArrayList<>();
-		if (category == Category.HUD) {
-			for (HudElement e : HudElement.values()) list.add(hudTarget(e));
+		if (!category.parts().isEmpty()) {
+			for (TexturePart e : category.parts()) list.add(partTarget(e));
 		} else {
 			for (Item item : category.items()) list.add(itemTarget(item));
 		}
@@ -397,34 +446,34 @@ public final class StudioScreen extends Screen {
 	}
 
 	private String nameOf(Target t) {
-		return t.isHud() ? t.hud.label : stack(t.item).getHoverName().getString();
+		return t.isPart() ? t.part.label() : stack(t.item).getHoverName().getString();
 	}
 
 	private List<FilePackSource> packsFor(Target t) {
-		return t.isHud() ? index.packsForHud(t.hud) : index.packsFor(ItemInfo.of(t.item));
+		return t.isPart() ? index.packsForPart(t.part) : index.packsFor(ItemInfo.of(t.item));
 	}
 
 	private boolean provides(PackSource p, Target t) {
 		if (p instanceof VanillaSource) return true;
-		return t.isHud() ? !index.hudFiles(p, t.hud).isEmpty() : index.provided(p, ItemInfo.of(t.item)).any();
+		return t.isPart() ? !index.partFiles(p, t.part).isEmpty() : index.provided(p, ItemInfo.of(t.item)).any();
 	}
 
 	private String fingerprint(PackSource p, Target t) {
-		return t.isHud() ? index.hudFingerprint(p, t.hud) : index.fingerprint(p, ItemInfo.of(t.item));
+		return t.isPart() ? index.partFingerprint(p, t.part) : index.fingerprint(p, ItemInfo.of(t.item));
 	}
 
 	private boolean sameAsBelow(PackSource p, Target t) {
-		return t.isHud() ? index.hudSameAsBelow(p, t.hud) : index.sameAsBelow(p, ItemInfo.of(t.item));
+		return t.isPart() ? index.partSameAsBelow(p, t.part) : index.sameAsBelow(p, ItemInfo.of(t.item));
 	}
 
 	private boolean belowIsVanilla(Target t) {
-		return t.isHud() ? index.hudBelowIsVanilla(t.hud) : index.belowIsVanilla(ItemInfo.of(t.item));
+		return t.isPart() ? index.partBelowIsVanilla(t.part) : index.belowIsVanilla(ItemInfo.of(t.item));
 	}
 
 	/** What a pack changes for a target, shown under the pack name. */
 	private String kindOf(PackSource p, Target t) {
-		if (t.isHud()) {
-			int n = index.hudFiles(p, t.hud).size();
+		if (t.isPart()) {
+			int n = index.partFiles(p, t.part).size();
 			return n + " texture" + (n == 1 ? "" : "s");
 		}
 		PackIndex.Provided provided = index.provided(p, ItemInfo.of(t.item));
@@ -435,10 +484,10 @@ public final class StudioScreen extends Screen {
 
 	/** Bytes of the picture for a pack's version of a target. */
 	private byte[] previewOf(PackSource p, Target t) {
-		if (!t.isHud()) return previewBytes(p, ItemInfo.of(t.item));
+		if (!t.isPart()) return previewBytes(p, ItemInfo.of(t.item));
 		try {
-			if (p.has(t.hud.preview)) return p.read(t.hud.preview);
-			List<String> files = index.hudFiles(p, t.hud);
+			if (p.has(t.part.preview())) return p.read(t.part.preview());
+			List<String> files = index.partFiles(p, t.part);
 			return files.isEmpty() ? null : p.read(files.get(0));
 		} catch (Exception e) {
 			return null;
@@ -446,7 +495,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	private String mainFile(Target t) {
-		return t.isHud() ? t.hud.preview : ItemInfo.of(t.item).mainTexture;
+		return t.isPart() ? t.part.preview() : ItemInfo.of(t.item).mainTexture;
 	}
 
 	private void setStyle(String key, String sourceId) {
@@ -476,20 +525,23 @@ public final class StudioScreen extends Screen {
 
 	/** Draws an item icon, or a HUD part's picture, in a size x size box. */
 	private void drawTargetIcon(GuiGraphicsExtractor ctx, Target t, int x, int y, int size) {
-		if (t.isHud()) {
-			String file = t.hud.preview;
+		if (t.isPart()) {
+			String file = t.part.preview();
 			if (drawPreview(ctx, "below|" + file, () -> Resources.readBelow(file), x, y, size)) return;
-			text(ctx, t.hud.label.substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
+			text(ctx, t.part.label().substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
 			return;
 		}
-		if (size == 16) {
-			ctx.fakeItem(stack(t.item), x, y);
+		// whole-number sizes keep pixel art sharp: 16, 32, 48...
+		int k = size / 16;
+		if (k <= 1) {
+			ctx.fakeItem(stack(t.item), x + Math.max(0, (size - 16) / 2), y + Math.max(0, (size - 16) / 2));
 			return;
 		}
+		int d = k * 16;
 		Matrix3x2fStack m = ctx.pose();
 		m.pushMatrix();
-		m.translate(x, y);
-		m.scale(size / 16f, size / 16f);
+		m.translate(x + (size - d) / 2, y + (size - d) / 2);
+		m.scale(k, k);
 		ctx.fakeItem(stack(t.item), 0, 0);
 		m.popMatrix();
 	}
@@ -562,16 +614,11 @@ public final class StudioScreen extends Screen {
 
 	private void drawHeader(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x = px + 8, y = py + 5;
-		roundRect(ctx, x, y, x + 14, y + 14, pal.strong());
-		Matrix3x2fStack m = ctx.pose();
-		m.pushMatrix();
-		m.translate(x + 2, y + 2);
-		m.scale(0.625f, 0.625f);
-		ctx.fakeItem(stack(Items.DIAMOND_SWORD), 0, 0);
-		m.popMatrix();
-		bold(ctx, "Item Studio", x + 20, py + 8, TEXT);
+		roundRect(ctx, x, y - 1, x + 18, y + 17, pal.strong());
+		ctx.fakeItem(stack(Items.DIAMOND_SWORD), x + 1, y);
+		bold(ctx, "Item Studio", x + 24, py + 8, TEXT);
 
-		int crumbX = x + 26 + boldW("Item Studio");
+		int crumbX = x + 30 + boldW("Item Studio");
 		fill(ctx, crumbX, py + 7, crumbX + 1, py + 17, pal.line2());
 		String where = !query.isEmpty() ? "Search" : category.label;
 		Target shownTarget = current();
@@ -604,7 +651,7 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1, y1, x2, y2, pal.rail());
 		fill(ctx, x2, y1, x2 + 1, y2, pal.line());
 		Category[] cats = Category.values();
-		int rowH = 18;
+		int rowH = 20;
 		int top = y1 + 6;
 		if (railW > 40) {
 			small(ctx, "CATEGORIES", x1 + 10, top, MUTED);
@@ -622,11 +669,11 @@ public final class StudioScreen extends Screen {
 			int bx1 = x1 + 5, bx2 = x2 - 5;
 			if (active) roundRect(ctx, bx1, y, bx2, y + rowH, pal.soft());
 			else if (hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
-			drawTargetIcon(ctx, cat == Category.HUD ? hudTarget(HudElement.HEARTS) : itemTarget(cat.icon), bx1 + 3, y + 3, 12);
+			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), bx1 + 2, y + 2, 16);
 			if (railW > 40) {
-				String count = cat == Category.ALL ? "" : String.valueOf(cat == Category.HUD ? HudElement.values().length : cat.items().size());
+				String count = cat == Category.ALL ? "" : String.valueOf(cat.parts().isEmpty() ? cat.items().size() : cat.parts().size());
 				int countW = smallW(count);
-				text(ctx, trim(cat.label, bx2 - bx1 - 24 - countW), bx1 + 18, y + 5, active ? 0xFFFFFFFF : TEXT2);
+				text(ctx, trim(cat.label, bx2 - bx1 - 27 - countW), bx1 + 21, y + 6, active ? 0xFFFFFFFF : TEXT2);
 				small(ctx, count, bx2 - 4 - countW, y + 6, active ? pal.accentText() : MUTED);
 			}
 			final Category target = cat;
@@ -654,7 +701,7 @@ public final class StudioScreen extends Screen {
 		// title row
 		String title = searching ? "Search" : category.label;
 		bold(ctx, title, x, y + 3, TEXT);
-		text(ctx, items.size() + (hudMode() ? " part" : " item") + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
+		text(ctx, items.size() + (partMode() ? " part" : " item") + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
 		if (!searching && category != Category.ALL) {
 			String label = bulkMode ? "Back to " + (cur == null ? "item" : trim(nameOf(cur), 60))
 				: "One pack for all";
@@ -694,7 +741,7 @@ public final class StudioScreen extends Screen {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
-					if (t.isHud()) selectedHud = t.hud;
+					if (t.isPart()) selectedPart.put(category, t.part);
 					else selected = t.item;
 					bulkMode = false;
 					settingsOpen = false;
@@ -837,9 +884,9 @@ public final class StudioScreen extends Screen {
 		int cols = Math.max(2, (w + gap) / (58 + gap));
 		int cardW = (w - gap * (cols - 1)) / cols;
 		int prev = cardW - 8;
-		int cardH = 4 + prev + 4 + 9 + 9 + 8 + 2;
+		int cardH = 4 + prev + 4 + 20 + smallH() + 1;
 		int rows = (cards.size() + cols - 1) / cols;
-		boolean worn = !t.isHud() && ItemInfo.of(t.item).hasWornLook();
+		boolean worn = !t.isPart() && ItemInfo.of(t.item).hasWornLook();
 		int hintH = cards.isEmpty() || packs.isEmpty() ? 26 : worn ? 12 : 0;
 		int content = rows * (cardH + gap) + hintH;
 		int off = scrollOf("cards", content, bottom - top);
@@ -867,8 +914,8 @@ public final class StudioScreen extends Screen {
 			String[] lines = twoLines(card.name, cardW - 8);
 			int ny = cy + 4 + prev + 4;
 			text(ctx, lines[0], cx + 4, ny, TEXT);
-			if (!lines[1].isEmpty()) text(ctx, lines[1], cx + 4, ny + 9, TEXT);
-			small(ctx, smallTrim(card.sub, cardW - 8), cx + 4, ny + (lines[1].isEmpty() ? 10 : 19), MUTED);
+			if (!lines[1].isEmpty()) text(ctx, lines[1], cx + 4, ny + 10, TEXT);
+			small(ctx, smallTrim(card.sub, cardW - 8), cx + 4, ny + (lines[1].isEmpty() ? 10 : 20), MUTED);
 
 			boolean fav = card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && isFavorite(card.ids);
 			if (on) {
@@ -1016,7 +1063,7 @@ public final class StudioScreen extends Screen {
 						drawTargetIcon(ctx, t, ox + 2, ty + 2, 16);
 					}
 				} else {
-					drawTargetIcon(ctx, t, ox + 4, ty + 4, 12);
+					drawTargetIcon(ctx, t, ox + 2, ty + 2, 16);
 					fill(ctx, ox, ty, ox + tile, ty + tile, 0x99000000 | (theme().base & 0xFFFFFF));
 				}
 				addHit(ox, ty, ox + tile, ty + tile, top, bottom, null, null,
@@ -1043,8 +1090,8 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1, top, x2, bottom, pal.rail());
 		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
 		Target sideTarget = current();
-		if (sideTarget != null && sideTarget.isHud()) {
-			drawHudSide(ctx, sideTarget, x1, x2, top);
+		if (sideTarget != null && sideTarget.isPart()) {
+			drawPartSide(ctx, sideTarget, x1, x2, top);
 			return;
 		}
 		if (selected == null) {
@@ -1068,21 +1115,14 @@ public final class StudioScreen extends Screen {
 			PackSource src = index.get(style);
 			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewBytes(src, info), ix1 + iw / 2 - 20, y + 8, 40);
 		}
-		if (!drawn) {
-			Matrix3x2fStack m = ctx.pose();
-			m.pushMatrix();
-			m.translate(ix1 + iw / 2 - 20, y + 8);
-			m.scale(2.5f, 2.5f);
-			ctx.fakeItem(stack(selected), 0, 0);
-			m.popMatrix();
-		}
-		small(ctx, "Preview", ix1 + 5, y + 49, MUTED);
+		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), ix1 + iw / 2 - 20, y + 8, 40);
+		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
 
 		bold(ctx, trim(stack(selected).getHoverName().getString(), iw), ix1, y, TEXT);
 		y += 11;
 		small(ctx, smallTrim(info.id, iw), ix1, y, MUTED);
-		y += 9;
+		y += smallH();
 		text(ctx, "Style", ix1, y + 2, MUTED);
 		String styleName = style == null ? "Default" : index != null && index.get(style) != null ? index.get(style).displayName() : style + " (missing)";
 		int chipX = ix1 + textW("Style") + 6;
@@ -1122,10 +1162,10 @@ public final class StudioScreen extends Screen {
 			boolean hover = inside(mouseX, mouseY, vx, vy, vx + vw, vy + 13);
 			roundRect(ctx, vx, vy, vx + vw, vy + 13, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
 			if (!on) outline(ctx, vx, vy, vx + vw, vy + 13, pal.surfaceBorder());
-			String l = smallTrim(v.label, vw - 4);
-			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + 4, on ? 0xFFFFFFFF : edited ? pal.accentText() : TEXT2);
+			String l = smallTrim(pixelFont() ? shortLabel(v) : v.label, vw - 4);
+			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + (pixelFont() ? 3 : 4), on ? 0xFFFFFFFF : edited ? pal.accentText() : TEXT2);
 			final View target = v;
-			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null, null, null));
+			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null, v.label, null));
 		}
 		y += 2 * 16 + 4;
 
@@ -1156,8 +1196,7 @@ public final class StudioScreen extends Screen {
 			}
 		}, null, null, null));
 		y += 12;
-		small(ctx, "Right-click a slider to reset it", ix1, y, MUTED);
-		y += 10;
+		y = smallWrapped(ctx, "Right-click a slider to reset it", ix1, y, iw, MUTED);
 		ctx.disableScissor();
 
 		int realContent = y + off - top + 6;
@@ -1165,7 +1204,7 @@ public final class StudioScreen extends Screen {
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
-	private void drawHudSide(GuiGraphicsExtractor ctx, Target t, int x1, int x2, int top) {
+	private void drawPartSide(GuiGraphicsExtractor ctx, Target t, int x1, int x2, int top) {
 		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
 		int y = top + 8;
 		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
@@ -1177,12 +1216,12 @@ public final class StudioScreen extends Screen {
 			drawn = drawPreview(ctx, src.id() + "|" + t.key, () -> previewOf(src, t), ix1 + iw / 2 - 20, y + 8, 40);
 		}
 		if (!drawn) drawTargetIcon(ctx, t, ix1 + iw / 2 - 20, y + 8, 40);
-		small(ctx, "Preview", ix1 + 5, y + 49, MUTED);
+		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
-		bold(ctx, trim(t.hud.label, iw), ix1, y, TEXT);
+		bold(ctx, trim(t.part.label(), iw), ix1, y, TEXT);
 		y += 11;
-		small(ctx, "HUD", ix1, y, MUTED);
-		y += 9;
+		small(ctx, t.part.kind(), ix1, y, MUTED);
+		y += smallH();
 		text(ctx, "Style", ix1, y + 2, MUTED);
 		String styleName = style == null ? "Default" : src != null ? src.displayName() : style + " (missing)";
 		int chipX = ix1 + textW("Style") + 6;
@@ -1192,9 +1231,7 @@ public final class StudioScreen extends Screen {
 		y += 18;
 		fill(ctx, ix1, y, ix2, y + 1, pal.line());
 		y += 8;
-		small(ctx, "HUD parts use the pack's textures", ix1, y, MUTED);
-		small(ctx, "as they are. Size and position", ix1, y + 8, MUTED);
-		small(ctx, "are for items only.", ix1, y + 16, MUTED);
+		smallWrapped(ctx, "These use the pack's textures as they are. Size and position are for items only.", ix1, y, iw, MUTED);
 	}
 
 	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
@@ -1278,9 +1315,7 @@ public final class StudioScreen extends Screen {
 			}, null, null, null));
 		}
 		y += 24;
-		small(ctx, "Menu key: Right Shift.", ix1, y, MUTED);
-		small(ctx, "Change it in Options > Controls.", ix1, y + 8, MUTED);
-		y += 24;
+		y = smallWrapped(ctx, "Menu key: Right Shift. Change it in Options > Controls.", ix1, y, iw, MUTED) + 6;
 		button(ctx, ix1, y, iw, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
 	}
 
@@ -1383,16 +1418,22 @@ public final class StudioScreen extends Screen {
 	private boolean drawPreview(GuiGraphicsExtractor ctx, String key, Supplier<byte[]> bytes, int x, int y, int size) {
 		PreviewTextures.Preview p = previews.get(key, bytes);
 		if (p == null) return false;
+		// Whole-number scales keep pixel art sharp; only pictures bigger than the box are shrunk.
 		if (p.width() > p.height()) {
-			// wide picture: show all of it, centred
-			int h = Math.max(1, size * p.height() / p.width());
-			ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x, y + (size - h) / 2, 0f, 0f, size, h,
+			// wide picture (hotbar, XP bar, buttons): show all of it, centred
+			int k = size / p.width();
+			int w = k >= 1 ? p.width() * k : size;
+			int h = k >= 1 ? p.height() * k : Math.max(1, size * p.height() / p.width());
+			ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x + (size - w) / 2, y + (size - h) / 2, 0f, 0f, w, h,
 				p.width(), p.height(), p.width(), p.height());
 			return true;
 		}
 		// square or tall (animated strip): show the first square frame
 		int square = p.width();
-		ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x, y, 0f, 0f, size, size, square, square, p.width(), p.height());
+		int k = size / square;
+		int d = k >= 1 ? square * k : size;
+		ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x + (size - d) / 2, y + (size - d) / 2, 0f, 0f, d, d,
+			square, square, p.width(), p.height());
 		return true;
 	}
 

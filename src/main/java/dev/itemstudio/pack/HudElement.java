@@ -6,7 +6,7 @@ import java.util.Locale;
  * Parts of the HUD and other UI that can be styled from packs. Each part is a set of texture files under
  * assets/minecraft/textures/gui/ that the game finds by name, so styling one just copies those files.
  */
-public enum HudElement {
+public enum HudElement implements TexturePart {
 	HEARTS("Hearts", "sprites/hud/heart/full.png", "sprites/hud/heart/"),
 	HUNGER("Hunger", "sprites/hud/food_full.png", "sprites/hud/food_"),
 	ARMOR("Armor bar", "sprites/hud/armor_full.png", "sprites/hud/armor_"),
@@ -33,8 +33,24 @@ public enum HudElement {
 		this.prefixes = prefixes;
 	}
 
+	@Override
 	public String key() {
 		return KEY_PREFIX + name().toLowerCase(Locale.ROOT);
+	}
+
+	@Override
+	public String label() {
+		return label;
+	}
+
+	@Override
+	public String preview() {
+		return preview;
+	}
+
+	@Override
+	public String kind() {
+		return "HUD";
 	}
 
 	public static HudElement byKey(String key) {
