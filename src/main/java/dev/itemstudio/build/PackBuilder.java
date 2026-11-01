@@ -9,6 +9,7 @@ import dev.itemstudio.Adjust;
 import dev.itemstudio.ItemStudioClient;
 import dev.itemstudio.StudioConfig;
 import dev.itemstudio.View;
+import dev.itemstudio.pack.HudElement;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
@@ -67,6 +68,10 @@ public final class PackBuilder {
 		items.addAll(config.styles.keySet());
 		items.addAll(config.adjust.keySet());
 		for (String itemId : items) {
+			if (itemId.startsWith(HudElement.KEY_PREFIX)) {
+				buildHud(itemId);
+				continue;
+			}
 			Identifier id = Identifier.tryParse(itemId);
 			if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) continue;
 			Item item = BuiltInRegistries.ITEM.getValue(id);
@@ -78,6 +83,26 @@ public final class PackBuilder {
 			}
 		}
 		return this;
+	}
+
+	/** HUD parts: the game finds these by name, so the chosen pack's files are copied to the same place. */
+	private void buildHud(String key) {
+		HudElement element = HudElement.byKey(key);
+		String styleId = config.styles.get(key);
+		if (element == null || styleId == null) return;
+		PackSource source = index.get(styleId);
+		if (source == null) {
+			problems.add(element.label + ": pack \"" + styleId + "\" is gone");
+			return;
+		}
+		for (String file : index.hudFiles(source, element)) {
+			try {
+				out.put(file, source.read(file));
+				if (source.has(file + ".mcmeta")) out.put(file + ".mcmeta", source.read(file + ".mcmeta"));
+			} catch (Exception e) {
+				problems.add(source.displayName() + ": could not read " + file);
+			}
+		}
 	}
 
 	private void buildItem(ItemInfo info) throws Exception {

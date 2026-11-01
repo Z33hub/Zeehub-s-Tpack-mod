@@ -7,6 +7,7 @@ import dev.itemstudio.View;
 import dev.itemstudio.build.PackBuilder;
 import dev.itemstudio.build.PackWriter;
 import dev.itemstudio.pack.FilePackSource;
+import dev.itemstudio.pack.HudElement;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
@@ -105,6 +106,7 @@ public final class StudioScreen extends Screen {
 	private CompletableFuture<PackIndex> loading;
 	private Category category = Category.SWORDS;
 	private Item selected;
+	private HudElement selectedHud = HudElement.HEARTS;
 	private View view = View.FIRST_PERSON;
 	private Filter filter = Filter.ALL;
 	private boolean bulkMode;
@@ -347,32 +349,149 @@ public final class StudioScreen extends Screen {
 		startScan("Rescanning packs...");
 	}
 
-	private void setStyle(Item item, String sourceId) {
-		String id = BuiltInRegistries.ITEM.getKey(item).toString();
-		if (sourceId == null) config.styles.remove(id);
+	/** Something that can be styled: an item, or a part of the HUD. */
+	private record Target(String key, Item item, HudElement hud) {
+		boolean isHud() {
+			return hud != null;
+		}
+	}
+
+	private Target itemTarget(Item item) {
+		return new Target(BuiltInRegistries.ITEM.getKey(item).toString(), item, null);
+	}
+
+	private Target hudTarget(HudElement element) {
+		return new Target(element.key(), null, element);
+	}
+
+	private boolean hudMode() {
+		return category == Category.HUD && query.isEmpty();
+	}
+
+	/** The item or HUD part shown in the gallery and on the right. */
+	private Target current() {
+		if (hudMode()) return hudTarget(selectedHud);
+		return selected == null ? null : itemTarget(selected);
+	}
+
+	/** The tiles in the row at the top. */
+	private List<Target> tiles() {
+		List<Target> list = new ArrayList<>();
+		if (hudMode()) {
+			for (HudElement e : HudElement.values()) list.add(hudTarget(e));
+		} else {
+			for (Item item : gridItems()) list.add(itemTarget(item));
+		}
+		return list;
+	}
+
+	/** Everything "One pack for all" works on. */
+	private List<Target> groupTargets() {
+		List<Target> list = new ArrayList<>();
+		if (category == Category.HUD) {
+			for (HudElement e : HudElement.values()) list.add(hudTarget(e));
+		} else {
+			for (Item item : category.items()) list.add(itemTarget(item));
+		}
+		return list;
+	}
+
+	private String nameOf(Target t) {
+		return t.isHud() ? t.hud.label : stack(t.item).getHoverName().getString();
+	}
+
+	private List<FilePackSource> packsFor(Target t) {
+		return t.isHud() ? index.packsForHud(t.hud) : index.packsFor(ItemInfo.of(t.item));
+	}
+
+	private boolean provides(PackSource p, Target t) {
+		if (p instanceof VanillaSource) return true;
+		return t.isHud() ? !index.hudFiles(p, t.hud).isEmpty() : index.provided(p, ItemInfo.of(t.item)).any();
+	}
+
+	private String fingerprint(PackSource p, Target t) {
+		return t.isHud() ? index.hudFingerprint(p, t.hud) : index.fingerprint(p, ItemInfo.of(t.item));
+	}
+
+	private boolean sameAsBelow(PackSource p, Target t) {
+		return t.isHud() ? index.hudSameAsBelow(p, t.hud) : index.sameAsBelow(p, ItemInfo.of(t.item));
+	}
+
+	private boolean belowIsVanilla(Target t) {
+		return t.isHud() ? index.hudBelowIsVanilla(t.hud) : index.belowIsVanilla(ItemInfo.of(t.item));
+	}
+
+	/** What a pack changes for a target, shown under the pack name. */
+	private String kindOf(PackSource p, Target t) {
+		if (t.isHud()) {
+			int n = index.hudFiles(p, t.hud).size();
+			return n + " texture" + (n == 1 ? "" : "s");
+		}
+		PackIndex.Provided provided = index.provided(p, ItemInfo.of(t.item));
+		boolean model = provided.itemDef() || !provided.models().isEmpty() || !provided.parentModels().isEmpty();
+		boolean tex = !provided.textures().isEmpty();
+		return model && tex ? "Texture + model" : model ? "Model" : "Texture";
+	}
+
+	/** Bytes of the picture for a pack's version of a target. */
+	private byte[] previewOf(PackSource p, Target t) {
+		if (!t.isHud()) return previewBytes(p, ItemInfo.of(t.item));
+		try {
+			if (p.has(t.hud.preview)) return p.read(t.hud.preview);
+			List<String> files = index.hudFiles(p, t.hud);
+			return files.isEmpty() ? null : p.read(files.get(0));
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	private String mainFile(Target t) {
+		return t.isHud() ? t.hud.preview : ItemInfo.of(t.item).mainTexture;
+	}
+
+	private void setStyle(String key, String sourceId) {
+		if (sourceId == null) config.styles.remove(key);
 		else {
-			config.styles.put(id, sourceId);
+			config.styles.put(key, sourceId);
 			if (!VanillaSource.ID.equals(sourceId)) config.markRecent(sourceId);
 		}
 	}
 
+	private String styleOf(String key) {
+		return config.styles.get(key);
+	}
+
 	private String styleOf(Item item) {
-		return config.styles.get(BuiltInRegistries.ITEM.getKey(item).toString());
+		return styleOf(BuiltInRegistries.ITEM.getKey(item).toString());
 	}
 
 	private void useForCategory(String sourceId) {
-		for (Item item : category.items()) {
-			if (sourceId == null) {
-				setStyle(item, null);
-				continue;
-			}
-			PackSource source = index.get(sourceId);
-			if (source == null) continue;
-			if (source instanceof VanillaSource || index.provided(source, ItemInfo.of(item)).any()) {
-				setStyle(item, sourceId);
-			}
+		PackSource source = sourceId == null ? null : index.get(sourceId);
+		for (Target t : groupTargets()) {
+			if (sourceId == null) setStyle(t.key, null);
+			else if (source != null && provides(source, t)) setStyle(t.key, sourceId);
 		}
 		changed(true);
+	}
+
+	/** Draws an item icon, or a HUD part's picture, in a size x size box. */
+	private void drawTargetIcon(GuiGraphicsExtractor ctx, Target t, int x, int y, int size) {
+		if (t.isHud()) {
+			String file = t.hud.preview;
+			if (drawPreview(ctx, "below|" + file, () -> Resources.readBelow(file), x, y, size)) return;
+			text(ctx, t.hud.label.substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
+			return;
+		}
+		if (size == 16) {
+			ctx.fakeItem(stack(t.item), x, y);
+			return;
+		}
+		Matrix3x2fStack m = ctx.pose();
+		m.pushMatrix();
+		m.translate(x, y);
+		m.scale(size / 16f, size / 16f);
+		ctx.fakeItem(stack(t.item), 0, 0);
+		m.popMatrix();
 	}
 
 	private void toggleFavorite(List<String> ids) {
@@ -455,7 +574,8 @@ public final class StudioScreen extends Screen {
 		int crumbX = x + 26 + boldW("Item Studio");
 		fill(ctx, crumbX, py + 7, crumbX + 1, py + 17, pal.line2());
 		String where = !query.isEmpty() ? "Search" : category.label;
-		String item = selected == null ? "" : stack(selected).getHoverName().getString();
+		Target shownTarget = current();
+		String item = shownTarget == null ? "" : nameOf(shownTarget);
 		int roomEnd = search.getX() - 12;
 		if (roomEnd - crumbX > 60) {
 			String crumb = trim(where + "  /  " + item, roomEnd - crumbX - 8);
@@ -502,14 +622,9 @@ public final class StudioScreen extends Screen {
 			int bx1 = x1 + 5, bx2 = x2 - 5;
 			if (active) roundRect(ctx, bx1, y, bx2, y + rowH, pal.soft());
 			else if (hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
-			Matrix3x2fStack m = ctx.pose();
-			m.pushMatrix();
-			m.translate(bx1 + 3, y + 3);
-			m.scale(0.75f, 0.75f);
-			ctx.fakeItem(stack(cat.icon), 0, 0);
-			m.popMatrix();
+			drawTargetIcon(ctx, cat == Category.HUD ? hudTarget(HudElement.HEARTS) : itemTarget(cat.icon), bx1 + 3, y + 3, 12);
 			if (railW > 40) {
-				String count = cat == Category.ALL ? "" : String.valueOf(cat.items().size());
+				String count = cat == Category.ALL ? "" : String.valueOf(cat == Category.HUD ? HudElement.values().length : cat.items().size());
 				int countW = smallW(count);
 				text(ctx, trim(cat.label, bx2 - bx1 - 24 - countW), bx1 + 18, y + 5, active ? 0xFFFFFFFF : TEXT2);
 				small(ctx, count, bx2 - 4 - countW, y + 6, active ? pal.accentText() : MUTED);
@@ -530,7 +645,8 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void drawCenter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
-		List<Item> items = gridItems();
+		List<Target> items = tiles();
+		Target cur = current();
 		boolean searching = !query.isEmpty();
 		int x = centerX, w = centerW;
 		int y = bodyY + 8;
@@ -538,9 +654,9 @@ public final class StudioScreen extends Screen {
 		// title row
 		String title = searching ? "Search" : category.label;
 		bold(ctx, title, x, y + 3, TEXT);
-		text(ctx, items.size() + " item" + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
+		text(ctx, items.size() + (hudMode() ? " part" : " item") + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
 		if (!searching && category != Category.ALL) {
-			String label = bulkMode ? "Back to " + (selected == null ? "item" : trim(stack(selected).getHoverName().getString(), 60))
+			String label = bulkMode ? "Back to " + (cur == null ? "item" : trim(nameOf(cur), 60))
 				: "One pack for all";
 			int bw = textW(label) + 14;
 			button(ctx, x + w - bw, y, bw, 15, label, bulkMode, false, mouseX, mouseY, () -> {
@@ -567,23 +683,24 @@ public final class StudioScreen extends Screen {
 				int tx = x + (i % cols) * (tile + gap);
 				int ty = y + (i / cols) * (tile + gap) - off;
 				if (ty + tile < y || ty > y + areaH) continue;
-				Item item = items.get(i);
-				boolean isSelected = item == selected;
+				Target t = items.get(i);
+				boolean isSelected = cur != null && t.key.equals(cur.key);
 				boolean hover = inside(mouseX, mouseY, tx, Math.max(ty, y), tx + tile, Math.min(ty + tile, y + areaH));
 				roundRect(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
 				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
-				ctx.fakeItem(stack(item), tx + 3, ty + 3);
-				String id = BuiltInRegistries.ITEM.getKey(item).toString();
+				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
+				String id = t.key;
 				if (config.styles.containsKey(id) || config.hasAdjust(id)) {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
-					selected = item;
+					if (t.isHud()) selectedHud = t.hud;
+					else selected = t.item;
 					bulkMode = false;
 					settingsOpen = false;
 					scroll.put("cards", 0);
 					scroll.put("side", 0);
-				}, stack(item).getHoverName().getString());
+				}, nameOf(t));
 			}
 			ctx.disableScissor();
 		}
@@ -635,8 +752,8 @@ public final class StudioScreen extends Screen {
 		}
 		if (bulkMode && !searching && category != Category.ALL) {
 			drawBulk(ctx, x, y, w, footerY - 6, mouseX, mouseY);
-		} else if (selected != null) {
-			drawCards(ctx, ItemInfo.of(selected), x, y, w, footerY - 6, mouseX, mouseY);
+		} else if (cur != null) {
+			drawCards(ctx, cur, x, y, w, footerY - 6, mouseX, mouseY);
 		}
 	}
 
@@ -676,27 +793,27 @@ public final class StudioScreen extends Screen {
 		return b.toString();
 	}
 
-	private void drawCards(GuiGraphicsExtractor ctx, ItemInfo info, int x, int top, int w, int bottom, int mouseX, int mouseY) {
-		String main = info.mainTexture;
-		String current = styleOf(selected);
-		List<FilePackSource> packs = index.packsFor(info);
+	private void drawCards(GuiGraphicsExtractor ctx, Target t, int x, int top, int w, int bottom, int mouseX, int mouseY) {
+		String main = mainFile(t);
+		String current = styleOf(t.key);
+		List<FilePackSource> packs = packsFor(t);
 
 		// Packs whose files are exactly what the game already shows fold into "Default";
 		// packs with identical files for this item become one card.
 		List<FilePackSource> likeDefault = new ArrayList<>();
 		Map<String, List<FilePackSource>> groups = new LinkedHashMap<>();
 		for (FilePackSource pack : packs) {
-			if (!pack.id().equals(current) && index.sameAsBelow(pack, info)) likeDefault.add(pack);
-			else groups.computeIfAbsent(index.fingerprint(pack, info), k -> new ArrayList<>()).add(pack);
+			if (!pack.id().equals(current) && sameAsBelow(pack, t)) likeDefault.add(pack);
+			else groups.computeIfAbsent(fingerprint(pack, t), k -> new ArrayList<>()).add(pack);
 		}
 
 		List<Card> cards = new ArrayList<>();
 		boolean showFixed = styleQuery.isEmpty() && filter == Filter.ALL;
 		if (showFixed) {
 			cards.add(new Card(null, List.of(), "Default", "What the game shows now",
-				"Don't change this item" + (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault)),
+				"Don't change this" + (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault)),
 				() -> main == null ? null : Resources.readBelow(main), "below|" + main));
-			if (!index.belowIsVanilla(info) || VanillaSource.ID.equals(current)) {
+			if (!belowIsVanilla(t) || VanillaSource.ID.equals(current)) {
 				cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look",
 					"The normal Minecraft look, even if another pack changes it",
 					() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
@@ -710,14 +827,10 @@ public final class StudioScreen extends Screen {
 				if (pack.id().equals(current)) shown = pack;
 			}
 			final FilePackSource preview = shown;
-			PackIndex.Provided provided = index.provided(shown, info);
-			boolean model = provided.itemDef() || !provided.models().isEmpty() || !provided.parentModels().isEmpty();
-			boolean tex = !provided.textures().isEmpty();
-			String sub = group.size() > 1 ? "Same look in " + group.size() + " packs"
-				: model && tex ? "Texture + model" : model ? "Model" : "Texture";
+			String sub = group.size() > 1 ? "Same look in " + group.size() + " packs" : kindOf(shown, t);
 			String tip = group.size() == 1 ? shown.displayName() : "Same look in: " + names(group);
 			cards.add(new Card(shown.id(), ids, shown.displayName(), sub, tip + " - right-click to favorite",
-				() -> previewBytes(preview, info), shown.id() + "|" + info.id));
+				() -> previewOf(preview, t), shown.id() + "|" + t.key));
 		}
 
 		int gap = 6;
@@ -726,7 +839,8 @@ public final class StudioScreen extends Screen {
 		int prev = cardW - 8;
 		int cardH = 4 + prev + 4 + 9 + 9 + 8 + 2;
 		int rows = (cards.size() + cols - 1) / cols;
-		int hintH = cards.isEmpty() || packs.isEmpty() ? 26 : info.hasWornLook() ? 12 : 0;
+		boolean worn = !t.isHud() && ItemInfo.of(t.item).hasWornLook();
+		int hintH = cards.isEmpty() || packs.isEmpty() ? 26 : worn ? 12 : 0;
 		int content = rows * (cardH + gap) + hintH;
 		int off = scrollOf("cards", content, bottom - top);
 		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
@@ -747,13 +861,7 @@ public final class StudioScreen extends Screen {
 			roundRect(ctx, cx + 4, cy + 4, cx + 4 + prev, cy + 4 + prev, pal.well());
 			int img = prev - 10;
 			if (!drawPreview(ctx, card.imageKey, card.image, cx + 9, cy + 9, img)) {
-				Matrix3x2fStack m = ctx.pose();
-				m.pushMatrix();
-				float scale = img / 16f;
-				m.translate(cx + 9, cy + 9);
-				m.scale(scale, scale);
-				ctx.fakeItem(stack(selected), 0, 0);
-				m.popMatrix();
+				drawTargetIcon(ctx, t, cx + 9, cy + 9, img);
 			}
 			// name on up to two lines, then the kind of change
 			String[] lines = twoLines(card.name, cardW - 8);
@@ -773,7 +881,7 @@ public final class StudioScreen extends Screen {
 			Runnable favToggle = () -> toggleFavorite(ids);
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
 				if (alreadyOn) return;
-				setStyle(selected, sourceId);
+				setStyle(t.key, sourceId);
 				changed(true);
 			}, favToggle, card.tooltip);
 			if (card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && (fav || hover)) {
@@ -787,9 +895,9 @@ public final class StudioScreen extends Screen {
 			text(ctx, styleQuery.isEmpty() ? "No packs here yet." : "No packs match \"" + styleQuery + "\"", x, hy, MUTED);
 			if (filter == Filter.FAVORITES) small(ctx, "Right-click a style card to add it to favorites.", x, hy + 11, MUTED);
 		} else if (packs.isEmpty()) {
-			text(ctx, "None of your packs change this item.", x, hy, MUTED);
+			text(ctx, "None of your packs change this.", x, hy, MUTED);
 			small(ctx, "Add packs to your resourcepacks folder and press Rescan.", x, hy + 11, MUTED);
-		} else if (info.hasWornLook()) {
+		} else if (worn) {
 			small(ctx, "Packs here also change how it looks when worn or used.", x, hy, MUTED);
 		}
 		ctx.disableScissor();
@@ -824,17 +932,16 @@ public final class StudioScreen extends Screen {
 
 	/** One pack for all: a row per pack showing which items of the group it changes. */
 	private void drawBulk(GuiGraphicsExtractor ctx, int x, int top, int w, int bottom, int mouseX, int mouseY) {
-		List<Item> items = category.items();
+		List<Target> items = groupTargets();
 		Map<String, List<FilePackSource>> groups = new LinkedHashMap<>();
 		Map<String, int[]> counts = new HashMap<>();
 		for (FilePackSource pack : index.packs()) {
 			int count = 0;
 			StringBuilder look = new StringBuilder();
-			for (Item item : items) {
-				ItemInfo info = ItemInfo.of(item);
-				if (index.provided(pack, info).any()) {
+			for (Target t : items) {
+				if (provides(pack, t)) {
 					count++;
-					look.append(info.id).append('=').append(index.fingerprint(pack, info)).append(';');
+					look.append(t.key).append('=').append(fingerprint(pack, t)).append(';');
 				}
 			}
 			if (count == 0) continue;
@@ -851,7 +958,7 @@ public final class StudioScreen extends Screen {
 		ctx.enableScissor(x, top, x + w, bottom);
 		int y = top - off;
 		// reset row
-		boolean anyStyled = items.stream().anyMatch(i -> styleOf(i) != null);
+		boolean anyStyled = items.stream().anyMatch(t -> styleOf(t.key) != null);
 		String reset = "Reset all " + category.label.toLowerCase(Locale.ROOT) + " to Default";
 		if (anyStyled) {
 			int rw = textW(reset) + 14;
@@ -872,9 +979,9 @@ public final class StudioScreen extends Screen {
 			FilePackSource pack = group.get(0);
 			int count = counts.get(pack.id())[0];
 			boolean inUse = true;
-			for (Item item : items) {
-				if (index.provided(pack, ItemInfo.of(item)).any()) {
-					String s = styleOf(item);
+			for (Target t : items) {
+				if (provides(pack, t)) {
+					String s = styleOf(t.key);
 					if (s == null || group.stream().noneMatch(p -> p.id().equals(s))) {
 						inUse = false;
 						break;
@@ -893,9 +1000,8 @@ public final class StudioScreen extends Screen {
 			int tilesEnd = x + w - buttonW - 10;
 			int fit = Math.max(0, (tilesEnd - tx + 3) / (tile + 3));
 			for (int k = 0; k < items.size() && k < fit; k++) {
-				Item item = items.get(k);
-				ItemInfo info = ItemInfo.of(item);
-				boolean has = index.provided(pack, info).any();
+				Target t = items.get(k);
+				boolean has = provides(pack, t);
 				int ty = y + 7;
 				int ox = tx + k * (tile + 3);
 				if (k == fit - 1 && items.size() > fit) {
@@ -906,20 +1012,15 @@ public final class StudioScreen extends Screen {
 				}
 				roundRect(ctx, ox, ty, ox + tile, ty + tile, has ? pal.well() : pal.surface());
 				if (has) {
-					if (!drawPreview(ctx, pack.id() + "|" + info.id, () -> previewBytes(pack, info), ox + 2, ty + 2, tile - 4)) {
-						ctx.fakeItem(stack(item), ox + 2, ty + 2);
+					if (!drawPreview(ctx, pack.id() + "|" + t.key, () -> previewOf(pack, t), ox + 2, ty + 2, tile - 4)) {
+						drawTargetIcon(ctx, t, ox + 2, ty + 2, 16);
 					}
 				} else {
-					Matrix3x2fStack m = ctx.pose();
-					m.pushMatrix();
-					m.translate(ox + 4, ty + 4);
-					m.scale(0.75f, 0.75f);
-					ctx.fakeItem(stack(item), 0, 0);
-					m.popMatrix();
+					drawTargetIcon(ctx, t, ox + 4, ty + 4, 12);
 					fill(ctx, ox, ty, ox + tile, ty + tile, 0x99000000 | (theme().base & 0xFFFFFF));
 				}
 				addHit(ox, ty, ox + tile, ty + tile, top, bottom, null, null,
-					stack(item).getHoverName().getString() + (has ? "" : " (not in this pack)"));
+					nameOf(t) + (has ? "" : " (not in this pack)"));
 			}
 
 			String label = inUse ? "In use" : "Use for " + count;
@@ -941,6 +1042,11 @@ public final class StudioScreen extends Screen {
 		int x1 = sideX, x2 = px + pw - 1, top = bodyY, bottom = footerY;
 		fill(ctx, x1, top, x2, bottom, pal.rail());
 		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
+		Target sideTarget = current();
+		if (sideTarget != null && sideTarget.isHud()) {
+			drawHudSide(ctx, sideTarget, x1, x2, top);
+			return;
+		}
 		if (selected == null) {
 			text(ctx, "Pick an item", x1 + 10, top + 10, MUTED);
 			return;
@@ -1057,6 +1163,38 @@ public final class StudioScreen extends Screen {
 		int realContent = y + off - top + 6;
 		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+	}
+
+	private void drawHudSide(GuiGraphicsExtractor ctx, Target t, int x1, int x2, int top) {
+		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
+		int y = top + 8;
+		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
+		outline(ctx, ix1, y, ix2, y + 56, pal.line());
+		String style = ready() ? styleOf(t.key) : null;
+		PackSource src = style == null || index == null ? null : index.get(style);
+		boolean drawn = false;
+		if (src != null) {
+			drawn = drawPreview(ctx, src.id() + "|" + t.key, () -> previewOf(src, t), ix1 + iw / 2 - 20, y + 8, 40);
+		}
+		if (!drawn) drawTargetIcon(ctx, t, ix1 + iw / 2 - 20, y + 8, 40);
+		small(ctx, "Preview", ix1 + 5, y + 49, MUTED);
+		y += 62;
+		bold(ctx, trim(t.hud.label, iw), ix1, y, TEXT);
+		y += 11;
+		small(ctx, "HUD", ix1, y, MUTED);
+		y += 9;
+		text(ctx, "Style", ix1, y + 2, MUTED);
+		String styleName = style == null ? "Default" : src != null ? src.displayName() : style + " (missing)";
+		int chipX = ix1 + textW("Style") + 6;
+		String chip = trim(styleName, ix2 - chipX - 10);
+		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
+		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
+		y += 18;
+		fill(ctx, ix1, y, ix2, y + 1, pal.line());
+		y += 8;
+		small(ctx, "HUD parts use the pack's textures", ix1, y, MUTED);
+		small(ctx, "as they are. Size and position", ix1, y + 8, MUTED);
+		small(ctx, "are for items only.", ix1, y + 16, MUTED);
 	}
 
 	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
@@ -1245,7 +1383,15 @@ public final class StudioScreen extends Screen {
 	private boolean drawPreview(GuiGraphicsExtractor ctx, String key, Supplier<byte[]> bytes, int x, int y, int size) {
 		PreviewTextures.Preview p = previews.get(key, bytes);
 		if (p == null) return false;
-		int square = Math.min(p.width(), p.height());
+		if (p.width() > p.height()) {
+			// wide picture: show all of it, centred
+			int h = Math.max(1, size * p.height() / p.width());
+			ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x, y + (size - h) / 2, 0f, 0f, size, h,
+				p.width(), p.height(), p.width(), p.height());
+			return true;
+		}
+		// square or tall (animated strip): show the first square frame
+		int square = p.width();
 		ctx.blit(RenderPipelines.GUI_TEXTURED, p.id(), x, y, 0f, 0f, size, size, square, square, p.width(), p.height());
 		return true;
 	}
