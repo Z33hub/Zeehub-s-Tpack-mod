@@ -9,6 +9,7 @@ import dev.itemstudio.build.PackWriter;
 import dev.itemstudio.pack.FilePackSource;
 import dev.itemstudio.pack.TexturePart;
 import dev.itemstudio.pack.ItemInfo;
+import dev.itemstudio.pack.ModelPreview;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
 import dev.itemstudio.pack.Refs;
@@ -482,9 +483,41 @@ public final class StudioScreen extends Screen {
 		return model && tex ? "Texture + model" : model ? "Model" : "Texture";
 	}
 
+	/** Size of rendered 3D item pictures, in pixels (2x an inventory slot). */
+	private static final int MODEL_PREVIEW_SIZE = 32;
+
+	/** Reads a file from a pack, or from the game's current resources when the pack doesn't have it. */
+	private static byte[] readWithBelow(PackSource p, String path) {
+		try {
+			if (p.has(path)) return p.read(path);
+		} catch (Exception ignored) {
+		}
+		return Resources.readBelow(path);
+	}
+
+	/**
+	 * Picture of the item as it looks in the inventory: 3D models are drawn from their boxes, flat items show
+	 * their texture.
+	 */
+	private static byte[] itemPicture(ItemInfo info, java.util.function.Function<String, byte[]> read, byte[] flat) {
+		byte[] model = ModelPreview.render(info.id, info.models, read, MODEL_PREVIEW_SIZE);
+		return model != null ? model : flat;
+	}
+
+	/** Picture for the Default (what the game shows now) or Vanilla card. */
+	private byte[] basePreview(Target t, boolean vanilla) {
+		java.util.function.Function<String, byte[]> read = vanilla ? Resources::readVanilla : Resources::readBelow;
+		String main = mainFile(t);
+		byte[] flat = main == null ? null : read.apply(main);
+		return t.isPart() ? flat : itemPicture(ItemInfo.of(t.item), read, flat);
+	}
+
 	/** Bytes of the picture for a pack's version of a target. */
 	private byte[] previewOf(PackSource p, Target t) {
-		if (!t.isPart()) return previewBytes(p, ItemInfo.of(t.item));
+		if (!t.isPart()) {
+			ItemInfo info = ItemInfo.of(t.item);
+			return itemPicture(info, path -> readWithBelow(p, path), previewBytes(p, info));
+		}
 		try {
 			if (p.has(t.part.preview())) return p.read(t.part.preview());
 			List<String> files = index.partFiles(p, t.part);
@@ -859,11 +892,11 @@ public final class StudioScreen extends Screen {
 		if (showFixed) {
 			cards.add(new Card(null, List.of(), "Default", "What the game shows now",
 				"Don't change this" + (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault)),
-				() -> main == null ? null : Resources.readBelow(main), "below|" + main));
+				() -> basePreview(t, false), "below|" + t.key));
 			if (!belowIsVanilla(t) || VanillaSource.ID.equals(current)) {
 				cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look",
 					"The normal Minecraft look, even if another pack changes it",
-					() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
+					() -> basePreview(t, true), "vanilla|" + t.key));
 			}
 		}
 		for (List<FilePackSource> group : arrange(new ArrayList<>(groups.values()), g -> g)) {
@@ -1113,7 +1146,8 @@ public final class StudioScreen extends Screen {
 		boolean drawn = false;
 		if (ready() && style != null && index.get(style) != null) {
 			PackSource src = index.get(style);
-			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewBytes(src, info), ix1 + iw / 2 - 20, y + 8, 40);
+			Target shownItem = itemTarget(selected);
+			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, shownItem), ix1 + iw / 2 - 20, y + 8, 40);
 		}
 		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), ix1 + iw / 2 - 20, y + 8, 40);
 		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
