@@ -435,23 +435,64 @@ public final class StudioScreen extends Screen {
 		}
 	}
 
-	private record Card(String sourceId, String name, String tooltip, Supplier<byte[]> image, String imageKey) {
+	/**
+	 * One style card. sourceId is what gets saved when it is clicked; ids lists every source that looks exactly
+	 * the same, so identical packs show as one card.
+	 */
+	private record Card(String sourceId, List<String> ids, String name, String tooltip, Supplier<byte[]> image,
+	                    String imageKey) {
+	}
+
+	private static String names(List<FilePackSource> packs) {
+		StringBuilder b = new StringBuilder();
+		for (int i = 0; i < packs.size(); i++) {
+			if (i > 0) b.append(", ");
+			b.append(packs.get(i).displayName());
+		}
+		return b.toString();
 	}
 
 	private void drawStyles(DrawContext ctx, ItemInfo info, int x1, int top, int x2, int y2, int mouseX, int mouseY) {
 		List<Card> cards = new ArrayList<>();
 		String main = info.mainTexture;
-		cards.add(new Card(null, "Default", "Don't change this item (keeps whatever your other packs do)",
-			() -> main == null ? null : Resources.readBelow(main), "below|" + main));
-		cards.add(new Card(VanillaSource.ID, "Vanilla", "The normal Minecraft look, even if another pack changes it",
-			() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
+		String current = styleOf(selected);
 		List<FilePackSource> packs = index.packsFor(info);
+
+		// Packs whose files are exactly what the game already shows fold into "Default".
+		List<FilePackSource> likeDefault = new ArrayList<>();
+		Map<String, List<FilePackSource>> groups = new java.util.LinkedHashMap<>();
 		for (FilePackSource pack : packs) {
-			cards.add(new Card(pack.id(), pack.displayName(), pack.displayName(), () -> previewBytes(pack, info),
-				pack.id() + "|" + info.id));
+			if (!pack.id().equals(current) && index.sameAsBelow(pack, info)) {
+				likeDefault.add(pack);
+			} else {
+				groups.computeIfAbsent(index.fingerprint(pack, info), k -> new ArrayList<>()).add(pack);
+			}
 		}
 
-		String current = styleOf(selected);
+		String defaultTip = "Don't change this item (keeps whatever your other packs do)"
+			+ (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault));
+		cards.add(new Card(null, List.of(), "Default", defaultTip,
+			() -> main == null ? null : Resources.readBelow(main), "below|" + main));
+		// Vanilla is only worth showing when something else changes the item.
+		if (!index.belowIsVanilla(info) || VanillaSource.ID.equals(current)) {
+			cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla",
+				"The normal Minecraft look, even if another pack changes it",
+				() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
+		}
+		for (List<FilePackSource> group : groups.values()) {
+			FilePackSource shown = group.get(0);
+			List<String> ids = new ArrayList<>();
+			for (FilePackSource pack : group) {
+				ids.add(pack.id());
+				if (pack.id().equals(current)) shown = pack;
+			}
+			final FilePackSource preview = shown;
+			String name = group.size() == 1 ? shown.displayName() : shown.displayName() + " +" + (group.size() - 1);
+			String tip = group.size() == 1 ? shown.displayName()
+				: "Same look in " + group.size() + " packs: " + names(group);
+			cards.add(new Card(shown.id(), ids, name, tip, () -> previewBytes(preview, info), shown.id() + "|" + info.id));
+		}
+
 		int hintH = 0;
 		if (packs.isEmpty()) {
 			hintH = 22;
@@ -476,7 +517,7 @@ public final class StudioScreen extends Screen {
 			int cx = x1 + 6 + (i % cols) * (cardW + gap);
 			int cy = top + (i / cols) * (cardH + gap) - off;
 			if (cy + cardH < top || cy > bottom) continue;
-			boolean on = current == null ? card.sourceId == null : current.equals(card.sourceId);
+			boolean on = current == null ? card.sourceId == null : card.ids.contains(current);
 			boolean hover = inside(mouseX, mouseY, cx, Math.max(cy, top), cx + cardW, Math.min(cy + cardH, bottom));
 			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, hover ? CARD_HOVER : CARD);
 			if (on) outline(ctx, cx, cy, cx + cardW, cy + cardH, ACCENT);
@@ -497,8 +538,9 @@ public final class StudioScreen extends Screen {
 				fill(ctx, cx + cardW - 9, cy + 3, cx + cardW - 3, cy + 9, ACCENT);
 			}
 			final String sourceId = card.sourceId;
+			final boolean alreadyOn = on;
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
-				if (sourceId == null ? styleOf(selected) == null : sourceId.equals(styleOf(selected))) return;
+				if (alreadyOn) return;
 				setStyle(selected, sourceId);
 				changed(true);
 			}, card.tooltip);
@@ -654,26 +696,41 @@ public final class StudioScreen extends Screen {
 		Item first = category.items().isEmpty() ? null : category.items().get(0);
 		ItemInfo firstInfo = first == null ? null : ItemInfo.of(first);
 		String main = firstInfo == null ? null : firstInfo.mainTexture;
-		cards.add(new Card(null, "Default", "Undo: stop changing every item in this group",
+		cards.add(new Card(null, List.of(), "Default", "Undo: stop changing every item in this group",
 			() -> main == null ? null : Resources.readBelow(main), "below|" + main));
-		cards.add(new Card(VanillaSource.ID, "Vanilla", "Normal Minecraft look for the whole group",
+		cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look for the whole group",
 			() -> main == null ? null : Resources.readVanilla(main), "vanilla|" + main));
 		Map<String, Integer> counts = new HashMap<>();
+		Map<String, List<FilePackSource>> groups = new java.util.LinkedHashMap<>();
+		Map<String, ItemInfo> previewInfos = new HashMap<>();
 		for (FilePackSource pack : index.packs()) {
 			int count = 0;
 			ItemInfo shownInfo = null;
+			StringBuilder look = new StringBuilder();
 			for (Item item : category.items()) {
 				ItemInfo info = ItemInfo.of(item);
 				if (index.provided(pack, info).any()) {
 					count++;
 					if (shownInfo == null) shownInfo = info;
+					look.append(info.id).append('=').append(index.fingerprint(pack, info)).append(';');
 				}
 			}
 			if (count == 0) continue;
 			counts.put(pack.id(), count);
-			final ItemInfo previewInfo = shownInfo;
-			cards.add(new Card(pack.id(), pack.displayName(), pack.displayName() + " (" + count + " item" + (count == 1 ? "" : "s") + ")",
-				() -> previewBytes(pack, previewInfo), pack.id() + "|" + previewInfo.id));
+			previewInfos.put(pack.id(), shownInfo);
+			// packs that are identical for every item in the group become one card
+			groups.computeIfAbsent(look.toString(), k -> new ArrayList<>()).add(pack);
+		}
+		for (List<FilePackSource> group : groups.values()) {
+			FilePackSource pack = group.get(0);
+			int count = counts.get(pack.id());
+			final ItemInfo previewInfo = previewInfos.get(pack.id());
+			List<String> ids = new ArrayList<>();
+			for (FilePackSource p : group) ids.add(p.id());
+			String name = group.size() == 1 ? pack.displayName() : pack.displayName() + " +" + (group.size() - 1);
+			String tip = (group.size() == 1 ? pack.displayName() : "Same look in " + group.size() + " packs: " + names(group))
+				+ " (" + count + " item" + (count == 1 ? "" : "s") + ")";
+			cards.add(new Card(pack.id(), ids, name, tip, () -> previewBytes(pack, previewInfo), pack.id() + "|" + previewInfo.id));
 		}
 
 		int top = y1 + 44, bottom = y2 - 4;

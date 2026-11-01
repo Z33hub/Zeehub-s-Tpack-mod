@@ -116,8 +116,10 @@ public final class PackBuilder {
 			defChanged |= changed[0];
 
 			// Textures the game finds by name: the item's own textures and entity/armor textures.
+			// Skip ones already copied for this pack's own models, so the same image isn't stored twice.
 			PackIndex.Provided provided = index.provided(source, info);
 			for (String texture : provided.textures()) {
+				if (copier.alreadyCopied(texture) && !info.extraTextures.contains(texture)) continue;
 				copier.textureInPlace(texture);
 			}
 		}
@@ -310,6 +312,14 @@ public final class PackBuilder {
 				return newRef;
 			}
 			return null;
+		}
+
+		/** True if this texture file was already copied (under a new name) for one of this pack's models. */
+		boolean alreadyCopied(String file) {
+			for (String ref : copiedTextures.keySet()) {
+				if (Refs.textureFile(ref).equalsIgnoreCase(file)) return true;
+			}
+			return false;
 		}
 
 		/** Copies a texture to the same path, for textures the game finds by name. */
