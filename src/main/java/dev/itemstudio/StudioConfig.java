@@ -31,7 +31,6 @@ public final class StudioConfig {
 	// Look of the menu
 	public String theme = "PURPLE";
 	public float opacity = 0.78f;
-	public boolean minecraftFont = false;
 
 	// Style browsing
 	public java.util.Set<String> favorites = new java.util.TreeSet<>();
