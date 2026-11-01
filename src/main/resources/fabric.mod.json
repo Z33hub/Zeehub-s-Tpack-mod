@@ -1,0 +1,20 @@
+{
+	"schemaVersion": 1,
+	"id": "itemstudio",
+	"version": "${version}",
+	"name": "Item Studio",
+	"description": "Pick a texture and model for every item from the resource packs you already have, and change each item's size and position. Open with Right Shift.",
+	"authors": ["Item Studio"],
+	"license": "MIT",
+	"icon": "assets/itemstudio/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["dev.itemstudio.ItemStudioClient"]
+	},
+	"depends": {
+		"fabricloader": ">=0.17.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
