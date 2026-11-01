@@ -1,5 +1,6 @@
 package dev.itemstudio;
 
+import dev.itemstudio.build.PackWriter;
 import dev.itemstudio.ui.StudioScreen;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -11,6 +12,7 @@ import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -22,6 +24,7 @@ public final class ItemStudioClient implements ClientModInitializer {
 
 	private static final KeyBinding.Category CATEGORY = KeyBinding.Category.create(Identifier.of(MOD_ID, "main"));
 	private static KeyBinding openKey;
+	private static KeyBinding toggleKey;
 
 	@Override
 	public void onInitializeClient() {
@@ -29,6 +32,9 @@ public final class ItemStudioClient implements ClientModInitializer {
 
 		openKey = KeyBindingHelper.registerKeyBinding(
 			new KeyBinding("key.itemstudio.open", GLFW.GLFW_KEY_RIGHT_SHIFT, CATEGORY));
+		// No key by default, so it can't clash with anything. Set it in Mod Menu or Options > Controls.
+		toggleKey = KeyBindingHelper.registerKeyBinding(
+			new KeyBinding("key.itemstudio.toggle", GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			while (openKey.wasPressed()) {
@@ -36,6 +42,11 @@ public final class ItemStudioClient implements ClientModInitializer {
 					client.setScreen(new StudioScreen(null));
 				}
 			}
+			boolean toggle = false;
+			while (toggleKey.wasPressed()) {
+				toggle = true; // one toggle per tick, however many presses piled up
+			}
+			if (toggle) setEnabled(!StudioConfig.get().enabled);
 		});
 
 		// Small button in the top-left corner of the pause menu.
@@ -47,5 +58,30 @@ public final class ItemStudioClient implements ClientModInitializer {
 					.build());
 			}
 		});
+	}
+
+	public static KeyBinding openKey() {
+		return openKey;
+	}
+
+	public static KeyBinding toggleKey() {
+		return toggleKey;
+	}
+
+	/**
+	 * Turns the mod on or off. Off takes the generated pack out of the active packs, so the game shows
+	 * the player's normal packs again. Picks stay saved and come back when it is turned on.
+	 */
+	public static void setEnabled(boolean on) {
+		StudioConfig config = StudioConfig.get();
+		if (config.enabled == on) return;
+		config.enabled = on;
+		config.save();
+		PackWriter.enableAndReload(PackWriter.hasPack());
+		MinecraftClient client = MinecraftClient.getInstance();
+		if (client.inGameHud != null) {
+			client.inGameHud.setOverlayMessage(Text.literal("Item Studio: ")
+				.append(on ? Text.literal("ON").formatted(Formatting.GREEN) : Text.literal("OFF").formatted(Formatting.RED)), false);
+		}
 	}
 }

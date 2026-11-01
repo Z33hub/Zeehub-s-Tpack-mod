@@ -1,6 +1,7 @@
 package dev.itemstudio.build;
 
 import dev.itemstudio.ItemStudioClient;
+import dev.itemstudio.StudioConfig;
 import dev.itemstudio.pack.Resources;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.resource.ResourcePackManager;
@@ -61,9 +62,14 @@ public final class PackWriter {
 		}
 	}
 
+	/** True if a generated pack from an earlier Apply is on disk. */
+	public static boolean hasPack() {
+		return Files.isRegularFile(folder().resolve("pack.mcmeta"));
+	}
+
 	/**
-	 * Makes sure the generated pack is on (or off when empty) and at the top, then reloads resources.
-	 * The returned future finishes when the reload is done.
+	 * Makes sure the generated pack is on (or off when empty or when the mod is turned off) and at the top,
+	 * then reloads resources. The returned future finishes when the reload is done.
 	 */
 	public static CompletableFuture<Void> enableAndReload(boolean hasFiles) {
 		MinecraftClient client = MinecraftClient.getInstance();
@@ -72,7 +78,7 @@ public final class PackWriter {
 
 		List<String> enabled = new ArrayList<>(manager.getEnabledIds());
 		enabled.remove(Resources.GENERATED_PACK_ID);
-		if (hasFiles && manager.getIds().contains(Resources.GENERATED_PACK_ID)) {
+		if (hasFiles && StudioConfig.get().enabled && manager.getIds().contains(Resources.GENERATED_PACK_ID)) {
 			enabled.add(Resources.GENERATED_PACK_ID); // last = highest priority
 		}
 		manager.setEnabledProfiles(enabled);

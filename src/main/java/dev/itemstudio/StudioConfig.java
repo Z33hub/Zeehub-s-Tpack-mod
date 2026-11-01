@@ -27,6 +27,8 @@ public final class StudioConfig {
 	public Map<String, String> styles = new TreeMap<>();
 	public Map<String, Map<String, Adjust>> adjust = new TreeMap<>();
 	public boolean applyInstantly = false;
+	/** Off = the generated pack is taken out of the active packs. Picks stay saved. */
+	public boolean enabled = true;
 
 	// Look of the menu
 	public String theme = "PURPLE";
