@@ -5,3 +5,4 @@ Newest Item Studio for each Minecraft version. Pick the file that matches your g
 
 Put it in your `.minecraft/mods` folder together with Fabric API for the same version.
 In game press **Right Shift**, or click **Item Studio** in the pause menu.
+With **Mod Menu** installed, open Item Studio's settings there to turn the mod on or off and change its keys.

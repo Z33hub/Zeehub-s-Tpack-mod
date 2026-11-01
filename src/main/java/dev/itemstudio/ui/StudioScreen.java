@@ -382,7 +382,9 @@ public final class StudioScreen extends Screen {
 		}
 		pending = 0;
 		applied = snapshot();
-		if (builder.problems().isEmpty()) {
+		if (!config.enabled) {
+			setStatus("Saved - Item Studio is off, turn it on in Settings to see it", WARN);
+		} else if (builder.problems().isEmpty()) {
 			setStatus("Applied", GOOD);
 		} else {
 			setStatus("Applied with " + builder.problems().size() + " problem(s): " + builder.problems().get(0), WARN);
@@ -1301,6 +1303,19 @@ public final class StudioScreen extends Screen {
 		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
 		int y = top + 10;
 		bold(ctx, "Settings", ix1, y, TEXT);
+		// mod on/off switch, right side of the title row
+		boolean modOn = config.enabled;
+		String onLabel = modOn ? "Mod on" : "Mod off";
+		int swX = ix2 - 18 - 5 - textW(onLabel);
+		int trackY = y - 1;
+		roundRect(ctx, swX, trackY, swX + 18, trackY + 10, modOn ? pal.strong() : pal.line2());
+		int knobX = modOn ? swX + 9 : swX + 1;
+		roundRect(ctx, knobX, trackY + 1, knobX + 8, trackY + 9, 0xFFFFFFFF);
+		text(ctx, onLabel, swX + 23, y, modOn ? TEXT2 : WARN);
+		hits.add(new Hit(swX - 2, y - 3, ix2, y + 11, () -> {
+			ItemStudioClient.setEnabled(!config.enabled);
+			setStatus(config.enabled ? "Item Studio turned on" : "Item Studio turned off - your normal packs are back", config.enabled ? GOOD : WARN);
+		}, null, "Turn Item Studio on or off. Off puts your normal packs back; your picks stay saved.", null));
 		y += 16;
 
 		text(ctx, "Theme", ix1, y, TEXT2);
@@ -1349,8 +1364,12 @@ public final class StudioScreen extends Screen {
 			}, null, null, null));
 		}
 		y += 24;
-		y = smallWrapped(ctx, "Menu key: Right Shift. Change it in Options > Controls.", ix1, y, iw, MUTED) + 6;
-		button(ctx, ix1, y, iw, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
+		String keyName = ItemStudioClient.openKey().getTranslatedKeyMessage().getString();
+		y = smallWrapped(ctx, "Menu key: " + keyName, ix1, y, iw, MUTED) + 6;
+		int half = (iw - gap) / 2;
+		button(ctx, ix1, y, half, 16, "Keybinds", false, false, mouseX, mouseY,
+			() -> minecraft.gui.setScreen(new StudioConfigScreen(this)), "Change the menu key and the on/off key");
+		button(ctx, ix1 + half + gap, y, iw - half - gap, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
 	}
 
 	private void drawFooter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
