@@ -25,6 +25,7 @@ import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Style;
+import net.minecraft.text.StyleSpriteSource;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.Util;
@@ -55,6 +56,8 @@ public final class StudioScreen extends Screen {
 	private static final int GOOD = 0xFF5BE49B;
 	private static final int GOLD = 0xFFF5B83D;
 
+	private static final StyleSpriteSource.Font POPPINS = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins"));
+	private static final StyleSpriteSource.Font POPPINS_BOLD = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins_semibold"));
 
 	private static final int HEADER = 24;
 	private static final int FOOTER = 26;
@@ -196,10 +199,13 @@ public final class StudioScreen extends Screen {
 		ItemInfo.clearCache();
 	}
 
-	// ------------------------------------------------------------------ text (Minecraft font)
+	// ------------------------------------------------------------------ text with the menu font
 
 	private MutableText styled(String s, boolean bold) {
-		return bold ? Text.literal(s).setStyle(Style.EMPTY.withBold(true)) : Text.literal(s);
+		if (!config.customFont) {
+			return bold ? Text.literal(s).setStyle(Style.EMPTY.withBold(true)) : Text.literal(s);
+		}
+		return Text.literal(s).setStyle(Style.EMPTY.withFont(bold ? POPPINS_BOLD : POPPINS));
 	}
 
 	private int textW(String s) {
@@ -464,7 +470,7 @@ public final class StudioScreen extends Screen {
 
 		// settings and close
 		int gx = px + pw - 40, cx = px + pw - 21;
-		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme and opacity", mouseX, mouseY,
+		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme, opacity, font", mouseX, mouseY,
 			settingsOpen, () -> settingsOpen = !settingsOpen);
 		drawGear(ctx, gx + 4, py + 8, settingsOpen ? 0xFFFFFFFF : TEXT2);
 		iconButton(ctx, cx, py + 4, "Close (changes are applied)", mouseX, mouseY, false, this::close);
@@ -1117,6 +1123,23 @@ public final class StudioScreen extends Screen {
 			}, ix1, ix2, y, mouseX, mouseY, 100f);
 		y += 4;
 
+		text(ctx, "Text font", ix1, y, TEXT2);
+		y += 12;
+		String[] fonts = {"Minecraft", "Poppins"};
+		for (int i = 0; i < 2; i++) {
+			int fx = ix1 + i * (tw + gap);
+			boolean on = config.customFont == (i == 1);
+			boolean hover = inside(mouseX, mouseY, fx, y, fx + tw, y + 15);
+			roundRect(ctx, fx, y, fx + tw, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+			outline(ctx, fx, y, fx + tw, y + 15, on ? pal.accent() : pal.surfaceBorder());
+			text(ctx, fonts[i], fx + (tw - textW(fonts[i])) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
+			final boolean custom = i == 1;
+			hits.add(new Hit(fx, y, fx + tw, y + 15, () -> {
+				config.customFont = custom;
+				config.save();
+			}, null, null, null));
+		}
+		y += 24;
 		small(ctx, "Menu key: Right Shift.", ix1, y, MUTED);
 		small(ctx, "Change it in Options > Controls.", ix1, y + 8, MUTED);
 		y += 24;

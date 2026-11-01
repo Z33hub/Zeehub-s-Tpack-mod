@@ -31,6 +31,8 @@ public final class StudioConfig {
 	// Look of the menu
 	public String theme = "PURPLE";
 	public float opacity = 0.78f;
+	/** Off = Minecraft's own font (default). On = the Poppins font that comes with the mod. */
+	public boolean customFont = false;
 
 	// Style browsing
 	public java.util.Set<String> favorites = new java.util.TreeSet<>();
