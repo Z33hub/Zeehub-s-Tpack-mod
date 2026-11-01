@@ -849,7 +849,7 @@ public final class StudioScreen extends Screen {
 				return true;
 			}
 			if (hit.action != null) {
-				client.getSoundManager().play(PositionedSoundInstance.ui(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f));
+				client.getSoundManager().play(PositionedSoundInstance.ui(SoundEvents.UI_BUTTON_CLICK, 1.0f));
 				hit.action.run();
 				return true;
 			}

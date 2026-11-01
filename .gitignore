@@ -1,7 +1,7 @@
-.gradle/
-build/
-out/
-run/
+/.gradle/
+/build/
+/out/
+/run/
 *.iml
 .idea/
 .vscode/
