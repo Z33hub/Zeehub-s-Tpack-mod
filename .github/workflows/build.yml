@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Runs one at a time so two branches never edit the download release together.
+concurrency:
+  group: download-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,13 +33,20 @@ jobs:
           name: item-studio
           path: build/libs/*.jar
           if-no-files-found: error
-      - name: Publish release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Item Studio build ${{ github.run_number }}
-          body: |
-            Download the .jar below and put it in your `.minecraft/mods` folder (Fabric, Minecraft 1.21.11, needs Fabric API).
-            In game press Right Shift, or click Item Studio in the pause menu.
-          files: build/libs/*.jar
+      - name: Update the download release
+        # One release keeps the newest jar for every Minecraft version, so the
+        # repo page always shows both. Each branch replaces only its own jar.
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mc-26.2')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MC=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2)
+          TITLE="Item Studio (1.21.11 + 26.2)"
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --title "$TITLE" --notes-file .github/release-notes.md --target "$GITHUB_SHA"
+          fi
+          for a in $(gh release view latest --json assets --jq '.assets[].name'); do
+            case "$a" in *"+mc${MC}.jar") gh release delete-asset latest "$a" -y ;; esac
+          done
+          gh release upload latest build/libs/*.jar --clobber
+          gh release edit latest --title "$TITLE" --notes-file .github/release-notes.md --latest
