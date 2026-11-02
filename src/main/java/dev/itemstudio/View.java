@@ -7,7 +7,9 @@ public enum View {
 	INVENTORY("inventory", "Inventory", new String[]{"gui"}),
 	GROUND("ground", "Dropped", new String[]{"ground"}),
 	FRAME("frame", "Item frame", new String[]{"fixed"}),
-	HEAD("head", "On head", new String[]{"head"});
+	HEAD("head", "On head", new String[]{"head"}),
+	/** First person while holding right-click with a shield. Only shown for items with a "_blocking" model. */
+	BLOCKING("blocking", "While blocking", new String[]{"firstperson_righthand", "firstperson_lefthand"});
 
 	public final String key;
 	public final String label;

@@ -98,13 +98,15 @@ public final class PackBuilder {
 		String styleId = config.styles.get(key);
 		float size = config.partSizeOf(key);
 		boolean resized = element.resizable() && Math.abs(size - 1f) > 1e-3f;
-		if (styleId == null && !resized) return;
+		boolean lowered = element.heightAdjustable() && Math.abs(size - 1f) > 1e-3f;
+		boolean rebuild = resized || lowered;
+		if (styleId == null && !rebuild) return;
 		PackSource source = styleId == null ? null : index.get(styleId);
 		if (styleId != null && source == null) {
 			problems.add(element.label() + ": pack \"" + styleId + "\" is gone");
-			if (!resized) return;
+			if (!rebuild) return;
 		}
-		if (!resized) {
+		if (!rebuild) {
 			for (String file : index.partFiles(source, element)) {
 				try {
 					out.put(file, source.read(file));
@@ -127,6 +129,12 @@ public final class PackBuilder {
 					meta = Resources.readBelow(file + ".mcmeta");
 				}
 				if (png == null) continue;
+				if (lowered) {
+					byte[] low = TextureScaler.lower(png, meta, size);
+					out.put(file, low == null ? png : low);
+					if (meta != null) out.put(file + ".mcmeta", meta);
+					continue;
+				}
 				TextureScaler.Result scaled = TextureScaler.scale(png, meta, size);
 				out.put(file, scaled == null ? png : scaled.png());
 				byte[] outMeta = scaled == null ? meta : scaled.mcmeta();
@@ -199,8 +207,15 @@ public final class PackBuilder {
 		JsonObject wrapper = new JsonObject();
 		wrapper.addProperty("parent", modelRef);
 		JsonObject display = new JsonObject();
+		boolean blockingModel = Refs.path(modelRef).endsWith("_blocking");
 		for (View view : View.values()) {
+			if (view == View.BLOCKING) continue; // goes in place of first person, below
 			Adjust adjust = config.getAdjust(info.id, view);
+			if (view == View.FIRST_PERSON && blockingModel) {
+				// the shield's blocking model: "While blocking" wins over plain first person
+				Adjust blocking = config.getAdjust(info.id, View.BLOCKING);
+				if (blocking != null && !blocking.isDefault()) adjust = blocking;
+			}
 			if (adjust == null || adjust.isDefault()) continue;
 			for (int i = 0; i < view.displayKeys.length; i++) {
 				String key = view.displayKeys[i];

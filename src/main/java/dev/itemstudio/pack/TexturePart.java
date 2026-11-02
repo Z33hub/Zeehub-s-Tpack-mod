@@ -29,6 +29,11 @@ public interface TexturePart {
 		return this instanceof ParticleElement;
 	}
 
+	/** True for fire, which can be pushed down (low fire). Uses the same saved number as particle size. */
+	default boolean heightAdjustable() {
+		return this == EffectElement.FIRE;
+	}
+
 	static List<TexturePart> all() {
 		List<TexturePart> list = new ArrayList<>(List.of(HudElement.values()));
 		list.addAll(List.of(ParticleElement.values()));
