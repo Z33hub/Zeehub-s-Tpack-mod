@@ -138,6 +138,8 @@ public final class StudioScreen extends Screen {
 	/** Name box shown while renaming a profile. */
 	private EditBox profileName;
 	private boolean profilesOpen;
+	/** The profile being renamed is in view (the list can scroll). */
+	private boolean renameRowShown;
 	private boolean renamingProfile;
 	private int profileChipX;
 	private long deleteArmedUntil;
@@ -740,17 +742,23 @@ public final class StudioScreen extends Screen {
 		if (settingsOpen) drawSettings(ctx, mouseX, mouseY);
 		else drawSide(ctx, mouseX, mouseY);
 		drawFooter(ctx, mouseX, mouseY);
-		if (profilesOpen) drawProfiles(ctx, mouseX, mouseY);
-		profileName.visible = profilesOpen && renamingProfile;
+		renameRowShown = false;
+		if (profilesOpen) {
+			// Text boxes are drawn after everything else, so one under the list would show through it.
+			styleSearch.visible = false;
+			drawProfiles(ctx, mouseX, mouseY);
+		}
+		profileName.visible = profilesOpen && renamingProfile && renameRowShown;
 
 		super.extractRenderState(ctx, mouseX, mouseY, delta); // the search boxes (and the profile name box)
 
+		// Only the top-most thing under the mouse may show a tooltip, so nothing covered (by the profile list,
+		// for example) shows one through it.
 		for (int i = hits.size() - 1; i >= 0; i--) {
 			Hit hit = hits.get(i);
-			if (hit.tooltip != null && hit.contains(mouseX, mouseY)) {
-				ctx.setTooltipForNextFrame(Component.literal(hit.tooltip), mouseX, mouseY);
-				break;
-			}
+			if (!hit.contains(mouseX, mouseY)) continue;
+			if (hit.tooltip != null) ctx.setTooltipForNextFrame(Component.literal(hit.tooltip), mouseX, mouseY);
+			break;
 		}
 	}
 
@@ -776,6 +784,7 @@ public final class StudioScreen extends Screen {
 		hits.add(new Hit(chipX, py + 4, chipX + chipW, py + 20, () -> {
 			if (renamingProfile) commitRename();
 			profilesOpen = !profilesOpen;
+			if (profilesOpen) styleSearch.setFocused(false);
 		}, null, profilesOpen ? null : "Profiles: save and switch whole setups", null));
 
 		int crumbX = chipX + chipW + 8;
@@ -785,7 +794,7 @@ public final class StudioScreen extends Screen {
 		String item = shownTarget == null ? "" : nameOf(shownTarget);
 		int roomEnd = search.getX() - 12;
 		dev.itemstudio.UpdateCheck.Update update = dev.itemstudio.UpdateCheck.found();
-		if (update != null) {
+		if (update != null && search.getX() - 16 - 6 - (textW("Update " + update.version()) + 12) > crumbX + 8) {
 			String label = "Update " + update.version();
 			int uw = textW(label) + 12;
 			int ux = search.getX() - 16 - 6 - uw;
@@ -1817,18 +1826,26 @@ public final class StudioScreen extends Screen {
 		int w = 196, rowH = 14;
 		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 2;
 		int hintH = 2 * smallH() + 2;
-		int h = 22 + names.size() * rowH + 8 + 4 * 18 + hintH + 6;
+		int fixed = 22 + 8 + 4 * 18 + hintH + 6;
+		int room = Math.max(rowH * 2, (height - 6 - y - fixed) / rowH * rowH);
+		int listH = Math.min(names.size() * rowH, room);
+		int h = fixed + listH;
 		fill(ctx, x + 3, y + 3, x + w + 3, y + h + 3, 0x66000000);
-		roundRect(ctx, x, y, x + w, y + h, Theme.argb(theme().base, 0.97f));
+		roundRect(ctx, x, y, x + w, y + h, Theme.argb(theme().base, 1f));
 		outline(ctx, x, y, x + w, y + h, pal.accent());
 		hits.add(new Hit(x, y, x + w, y + h, () -> { }, () -> { }, null, null)); // clicks on empty parts do nothing
 		bold(ctx, "Profiles", x + 8, y + 7, TEXT);
 		String count = names.size() + " saved";
 		small(ctx, count, x + w - 8 - smallW(count), y + 7, MUTED);
-		int ry = y + 21;
+		int listTop = y + 21, listBottom = listTop + listH;
+		int content = names.size() * rowH;
+		int listOff = scrollOf("profiles", content, listH);
+		scrollAreas.add(new ScrollArea("profiles", x, listTop, x + w, listBottom, Math.max(0, content - listH)));
+		ctx.enableScissor(x + 1, listTop, x + w - 1, listBottom);
+		int ry = listTop - listOff;
 		for (String name : names) {
 			boolean active = name.equals(config.activeProfile);
-			boolean hover = inside(mouseX, mouseY, x + 4, ry, x + w - 4, ry + rowH);
+			boolean hover = inside(mouseX, mouseY, x + 4, Math.max(ry, listTop), x + w - 4, Math.min(ry + rowH, listBottom));
 			if (active) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.soft());
 			else if (hover) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.surfaceHover());
 			if (active) drawCheck(ctx, x + 8, ry + 4, pal.accentText());
@@ -1841,17 +1858,26 @@ public final class StudioScreen extends Screen {
 				profileName.setY(ry + 3);
 				profileName.setWidth(w - 30);
 				outline(ctx, x + 18, ry + 1, x + w - 6, ry + rowH - 1, pal.accent());
+				renameRowShown = ry >= listTop && ry + rowH <= listBottom;
 			} else {
 				text(ctx, trim(name, w - 34 - cw), x + 21, ry + 3, active ? 0xFFFFFFFF : TEXT2);
 				small(ctx, changes, x + w - 9 - cw, ry + 3, MUTED);
 			}
 			final String target = name;
 			if (!active) {
-				hits.add(new Hit(x + 4, ry, x + w - 4, ry + rowH, () -> switchProfile(target), null,
-					"Switch to " + name + " (applies right away)", null));
+				addHit(x + 4, ry, x + w - 4, ry + rowH, listTop, listBottom, () -> switchProfile(target),
+					"Switch to " + name + " (applies right away)");
 			}
 			ry += rowH;
 		}
+		ctx.disableScissor();
+		if (content > listH) {
+			// thin scroll bar
+			int barH = Math.max(8, listH * listH / content);
+			int barY = listTop + (listH - barH) * listOff / Math.max(1, content - listH);
+			fill(ctx, x + w - 3, barY, x + w - 2, barY + barH, pal.line2());
+		}
+		ry = listBottom;
 		fill(ctx, x + 6, ry + 3, x + w - 6, ry + 4, pal.line2());
 		ry += 8;
 		int bw = (w - 20) / 2;
@@ -1933,6 +1959,8 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void startRename() {
+		int at = new ArrayList<>(config.profiles.keySet()).indexOf(config.activeProfile);
+		if (at >= 0) scroll.put("profiles", Math.max(0, at * 14 - 14));
 		renamingProfile = true;
 		profileName.setValue(config.activeProfile);
 		setFocused(profileName);
@@ -2338,13 +2366,16 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
-		for (ScrollArea area : scrollAreas) {
+		for (int i = scrollAreas.size() - 1; i >= 0; i--) {
+			ScrollArea area = scrollAreas.get(i);
+			if (profilesOpen && !area.key.equals("profiles")) continue;
 			if (inside(mouseX, mouseY, area.x1, area.y1, area.x2, area.y2)) {
 				int value = scroll.getOrDefault(area.key, 0) - (int) Math.round(verticalAmount * 24);
 				scroll.put(area.key, Math.max(0, Math.min(area.max, value)));
 				return true;
 			}
 		}
+		if (profilesOpen) return true;
 		return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
 	}
 
