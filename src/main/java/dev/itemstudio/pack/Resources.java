@@ -67,6 +67,19 @@ public final class Resources {
 		return null;
 	}
 
+	/** PNG files the game knows under assets/minecraft/<folder> (vanilla and turned-on packs), as pack paths. */
+	public static List<String> listGame(String folder) {
+		List<String> list = new java.util.ArrayList<>();
+		try {
+			for (Identifier id : Minecraft.getInstance().getResourceManager()
+				.listResources(folder, i -> i.getPath().endsWith(".png")).keySet()) {
+				if (id.getNamespace().equals("minecraft")) list.add("assets/minecraft/" + id.getPath());
+			}
+		} catch (Exception ignored) {
+		}
+		return list;
+	}
+
 	public static JsonElement parse(byte[] bytes) {
 		if (bytes == null) return null;
 		try {

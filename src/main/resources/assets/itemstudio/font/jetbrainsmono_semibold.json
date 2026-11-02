@@ -1,0 +1,18 @@
+{
+  "providers": [
+    {
+      "type": "ttf",
+      "file": "itemstudio:jetbrainsmono-semibold.ttf",
+      "size": 8.1,
+      "oversample": 8.0,
+      "shift": [
+        0.0,
+        1.49
+      ]
+    },
+    {
+      "type": "reference",
+      "id": "minecraft:default"
+    }
+  ]
+}

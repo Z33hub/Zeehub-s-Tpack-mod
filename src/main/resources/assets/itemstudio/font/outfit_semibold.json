@@ -1,0 +1,18 @@
+{
+  "providers": [
+    {
+      "type": "ttf",
+      "file": "itemstudio:outfit-semibold.ttf",
+      "size": 8.03,
+      "oversample": 8.0,
+      "shift": [
+        0.0,
+        1.38
+      ]
+    },
+    {
+      "type": "reference",
+      "id": "minecraft:default"
+    }
+  ]
+}

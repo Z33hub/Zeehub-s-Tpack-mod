@@ -14,8 +14,11 @@ public enum HudElement implements TexturePart {
 	HOTBAR("Hotbar", "sprites/hud/hotbar_selection.png", "sprites/hud/hotbar"),
 	CROSSHAIR("Crosshair", "sprites/hud/crosshair.png", "sprites/hud/crosshair"),
 	XP_BAR("XP bar", "sprites/hud/experience_bar_progress.png", "sprites/hud/experience_bar"),
-	INVENTORY("Inventory", "container/inventory.png", "container/inventory.png", "container/creative_inventory/"),
-	BUTTONS("Buttons", "sprites/widget/button.png", "sprites/widget/button", "sprites/widget/slider");
+	INVENTORY("Inventory & chests", "container/inventory.png", "container/", "sprites/container/", "sprites/recipe_book/"),
+	BUTTONS("Buttons", "sprites/widget/button.png", "sprites/widget/button", "sprites/widget/slider"),
+	EFFECT_BOXES("Effect boxes", "sprites/hud/effect_background.png", "sprites/hud/effect_background"),
+	BOSS_BAR("Boss bars", "sprites/boss_bar/purple_progress.png", "sprites/boss_bar/"),
+	TOOLTIPS("Tooltips", "sprites/tooltip/background.png", "sprites/tooltip/");
 
 	/** Folder all of these live in. */
 	public static final String BASE = "assets/minecraft/textures/gui/";

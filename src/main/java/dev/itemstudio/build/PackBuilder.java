@@ -10,6 +10,7 @@ import dev.itemstudio.ItemStudioClient;
 import dev.itemstudio.StudioConfig;
 import dev.itemstudio.View;
 import dev.itemstudio.pack.TexturePart;
+import dev.itemstudio.pack.TextureScaler;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
@@ -67,6 +68,7 @@ public final class PackBuilder {
 		Set<String> items = new LinkedHashSet<>();
 		items.addAll(config.styles.keySet());
 		items.addAll(config.adjust.keySet());
+		items.addAll(config.partSize.keySet());
 		for (String itemId : items) {
 			if (TexturePart.byKey(itemId) != null) {
 				buildPart(itemId);
@@ -85,22 +87,52 @@ public final class PackBuilder {
 		return this;
 	}
 
-	/** HUD parts and particles: the game finds these by name, so the chosen pack's files are copied to the same place. */
+	/**
+	 * Blocks, HUD parts, particles and effects: the game finds these by name, so the chosen pack's files are copied
+	 * to the same place. Resized particles are rebuilt from every file of the particle: the pack's version where it
+	 * has one, otherwise what the game uses now.
+	 */
 	private void buildPart(String key) {
 		TexturePart element = TexturePart.byKey(key);
+		if (element == null) return;
 		String styleId = config.styles.get(key);
-		if (element == null || styleId == null) return;
-		PackSource source = index.get(styleId);
-		if (source == null) {
+		float size = config.partSizeOf(key);
+		boolean resized = element.resizable() && Math.abs(size - 1f) > 1e-3f;
+		if (styleId == null && !resized) return;
+		PackSource source = styleId == null ? null : index.get(styleId);
+		if (styleId != null && source == null) {
 			problems.add(element.label() + ": pack \"" + styleId + "\" is gone");
+			if (!resized) return;
+		}
+		if (!resized) {
+			for (String file : index.partFiles(source, element)) {
+				try {
+					out.put(file, source.read(file));
+					if (source.has(file + ".mcmeta")) out.put(file + ".mcmeta", source.read(file + ".mcmeta"));
+				} catch (Exception e) {
+					problems.add(source.displayName() + ": could not read " + file);
+				}
+			}
 			return;
 		}
-		for (String file : index.partFiles(source, element)) {
+		for (String file : index.partAllFiles(element)) {
 			try {
-				out.put(file, source.read(file));
-				if (source.has(file + ".mcmeta")) out.put(file + ".mcmeta", source.read(file + ".mcmeta"));
+				byte[] png;
+				byte[] meta;
+				if (source != null && source.has(file)) {
+					png = source.read(file);
+					meta = source.has(file + ".mcmeta") ? source.read(file + ".mcmeta") : null;
+				} else {
+					png = Resources.readBelow(file);
+					meta = Resources.readBelow(file + ".mcmeta");
+				}
+				if (png == null) continue;
+				TextureScaler.Result scaled = TextureScaler.scale(png, meta, size);
+				out.put(file, scaled == null ? png : scaled.png());
+				byte[] outMeta = scaled == null ? meta : scaled.mcmeta();
+				if (outMeta != null) out.put(file + ".mcmeta", outMeta);
 			} catch (Exception e) {
-				problems.add(source.displayName() + ": could not read " + file);
+				problems.add(element.label() + ": could not resize " + file);
 			}
 		}
 	}

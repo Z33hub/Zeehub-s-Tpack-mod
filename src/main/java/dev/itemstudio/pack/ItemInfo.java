@@ -107,6 +107,12 @@ public final class ItemInfo {
 				list.add("entity/end_crystal/end_crystal_beam");
 			}
 			case "trident" -> list.add("entity/trident");
+			// what you see when it is shot or thrown
+			case "arrow" -> list.add("entity/projectiles/arrow");
+			case "spectral_arrow" -> list.add("entity/projectiles/spectral_arrow");
+			case "tipped_arrow" -> list.add("entity/projectiles/tipped_arrow");
+			case "wind_charge" -> list.add("entity/projectiles/wind_charge");
+			case "fishing_rod" -> list.add("entity/fishing_hook");
 			case "elytra" -> list.add("entity/equipment/wings/elytra");
 			case "turtle_helmet" -> list.add("entity/equipment/humanoid/turtle_scute");
 			case "respawn_anchor" -> {
