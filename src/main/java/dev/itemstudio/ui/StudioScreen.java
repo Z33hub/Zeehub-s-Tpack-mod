@@ -136,6 +136,8 @@ public final class StudioScreen extends Screen {
 	/** Name box shown while renaming a profile. */
 	private EditBox profileName;
 	private boolean profilesOpen;
+	/** Left Alt held: tiles show how things looked before Item Studio. */
+	private boolean comparing;
 	private boolean renamingProfile;
 	private int profileChipX;
 	private long deleteArmedUntil;
@@ -720,6 +722,8 @@ public final class StudioScreen extends Screen {
 		scrollAreas.clear();
 		pal = theme().palette(config.opacity);
 		ready();
+		comparing = ready() && !search.isFocused() && !styleSearch.isFocused() && !profileName.isFocused()
+			&& com.mojang.blaze3d.platform.InputConstants.isKeyDown(minecraft.getWindow(), org.lwjgl.glfw.GLFW.GLFW_KEY_LEFT_ALT);
 
 		roundRect(ctx, px, py, px + pw, py + ph, pal.panel());
 		outline(ctx, px, py, px + pw, py + ph, pal.panelBorder());
@@ -897,8 +901,11 @@ public final class StudioScreen extends Screen {
 				boolean hover = inside(mouseX, mouseY, tx, Math.max(ty, y), tx + tile, Math.min(ty + tile, y + areaH));
 				roundRect(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
 				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
-				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
 				String id = t.key;
+				boolean changedTile = config.styles.containsKey(id) || config.partSize.containsKey(id);
+				if (!(comparing && changedTile && drawPreview(ctx, "below|" + id, () -> basePreview(t, false), tx + 3, ty + 3, 16))) {
+					drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
+				}
 				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)) {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
@@ -912,6 +919,12 @@ public final class StudioScreen extends Screen {
 				}, nameOf(t));
 			}
 			ctx.disableScissor();
+		}
+		if (comparing) {
+			String msg = "Before your changes - let go of Alt";
+			int mw = textW(msg) + 12;
+			roundRect(ctx, x + w - mw, bodyY + 8, x + w, bodyY + 23, WARN);
+			text(ctx, msg, x + w - mw + 6, bodyY + 12, 0xFF1A1206);
 		}
 		y += areaH + 8;
 
@@ -1280,13 +1293,18 @@ public final class StudioScreen extends Screen {
 		outline(ctx, ix1, y, ix2, y + 56, pal.line());
 		String style = ready() ? styleOf(selected) : null;
 		boolean drawn = false;
-		if (ready() && style != null && index.get(style) != null) {
+		boolean split = ready() && style != null && index.get(style) != null;
+		int pv = split ? Math.min(40, iw / 2 - 12) : 40;
+		int pcx = split ? ix1 + iw * 3 / 4 : ix1 + iw / 2;
+		if (split) {
+			drawBeforeHalf(ctx, itemTarget(selected), ix1, ix2, y, pv);
 			PackSource src = index.get(style);
 			Target shownItem = itemTarget(selected);
-			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, shownItem), ix1 + iw / 2 - 20, y + 8, 40);
+			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, shownItem), pcx - pv / 2, y + 28 - pv / 2, pv);
 		}
-		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), ix1 + iw / 2 - 20, y + 8, 40);
-		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
+		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), pcx - pv / 2, y + 28 - pv / 2, pv);
+		if (split) small(ctx, "After", ix2 - 5 - smallW("After"), y + 46, pal.accentText());
+		else small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
 
 		bold(ctx, trim(stack(selected).getHoverName().getString(), iw), ix1, y, TEXT);
@@ -1395,9 +1413,13 @@ public final class StudioScreen extends Screen {
 		outline(ctx, ix1, y, ix2, y + 56, pal.line());
 		String style = ready() ? styleOf(key) : null;
 		PackSource src = style == null || index == null ? null : index.get(style);
+		boolean split = src != null || config.partSize.containsKey(key);
+		int full = split ? Math.min(40, iw / 2 - 12) : 40;
 		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
-		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
-		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
+		int box = resizable ? Math.max(6, Math.round(full * Math.min(1f, size))) : full;
+		int pcx = split ? ix1 + iw * 3 / 4 : ix1 + iw / 2;
+		int bx = pcx - box / 2, by = y + 28 - box / 2;
+		if (split) drawBeforeHalf(ctx, t, ix1, ix2, y, full);
 		boolean drawn = false;
 		if (t.part.heightAdjustable() && config.partSize.containsKey(key)) {
 			// show the lowered fire
@@ -1413,7 +1435,8 @@ public final class StudioScreen extends Screen {
 			drawn = drawPreview(ctx, src.id() + "|" + key, () -> previewOf(src, t), bx, by, box);
 		}
 		if (!drawn) drawTargetIcon(ctx, t, bx, by, box);
-		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
+		if (split) small(ctx, "After", ix2 - 5 - smallW("After"), y + 46, pal.accentText());
+		else small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
 		bold(ctx, trim(t.part.label(), iw), ix1, y, TEXT);
 		y += 11;
@@ -1481,6 +1504,20 @@ public final class StudioScreen extends Screen {
 		int realContent = y + off - top + 6;
 		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+	}
+
+	/** Left half of a split preview: the look before Item Studio changed anything. */
+	private void drawBeforeHalf(GuiGraphicsExtractor ctx, Target t, int ix1, int ix2, int top, int size) {
+		int iw = ix2 - ix1;
+		int x = ix1 + iw / 4 - size / 2, y = top + 28 - size / 2;
+		if (!drawPreview(ctx, "below|" + t.key, () -> basePreview(t, false), x, y, size)) drawTargetIcon(ctx, t, x, y, size);
+		int mid = ix1 + iw / 2;
+		fill(ctx, mid, top + 8, mid + 1, top + 48, pal.line2());
+		// little arrow pointing from before to after
+		fill(ctx, mid - 3, top + 26, mid - 2, top + 31, MUTED);
+		fill(ctx, mid - 2, top + 27, mid - 1, top + 30, MUTED);
+		fill(ctx, mid - 1, top + 28, mid, top + 29, MUTED);
+		small(ctx, "Before", ix1 + 5, top + 46, MUTED);
 	}
 
 	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
@@ -1616,7 +1653,7 @@ public final class StudioScreen extends Screen {
 		y += 22;
 
 		String keyName = ItemStudioClient.openKey().getTranslatedKeyMessage().getString();
-		y = smallWrapped(ctx, "Menu key: " + keyName + ". Ctrl+Z undoes, Ctrl+F searches.", ix1, y, iw, MUTED) + 6;
+		y = smallWrapped(ctx, "Menu key: " + keyName + ". Ctrl+Z undoes, Ctrl+F searches, hold Alt to see the look before your changes.", ix1, y, iw, MUTED) + 6;
 		int half = (iw - gap) / 2;
 		button(ctx, ix1, y, half, 16, "Keybinds", false, false, mouseX, mouseY,
 			() -> minecraft.gui.setScreen(new StudioConfigScreen(this)), "Change the menu key and the on/off key");
