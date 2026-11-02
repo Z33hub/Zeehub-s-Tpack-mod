@@ -104,7 +104,7 @@ public final class StudioScreen extends Screen {
 		new com.google.gson.reflect.TypeToken<java.util.TreeMap<String, java.util.TreeMap<String, Adjust>>>() {}.getType();
 
 	/** Everything the user picks, for undo. */
-	private record State(Map<String, String> styles, String adjust, Map<String, Float> partSize) {
+	private record State(Map<String, String> styles, String adjust, Map<String, Float> partSize, String recolor) {
 	}
 
 	private final java.util.ArrayDeque<State> history = new java.util.ArrayDeque<>();
@@ -383,15 +383,18 @@ public final class StudioScreen extends Screen {
 		java.util.Set<String> ids = new java.util.HashSet<>(config.styles.keySet());
 		ids.addAll(config.adjust.keySet());
 		ids.addAll(config.partSize.keySet());
+		ids.addAll(config.recolor.keySet());
 		for (String id : ids) {
-			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)) + "|" + config.partSize.get(id));
+			dev.itemstudio.Recolor rc = config.recolor.get(id);
+			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)) + "|" + config.partSize.get(id)
+				+ "|" + (rc == null ? null : rc.key()));
 		}
 		return map;
 	}
 
 	private State captureState() {
 		return new State(new java.util.TreeMap<>(config.styles), SNAPSHOT_GSON.toJson(config.adjust),
-			new java.util.TreeMap<>(config.partSize));
+			new java.util.TreeMap<>(config.partSize), SNAPSHOT_GSON.toJson(config.recolor));
 	}
 
 	private void pushHistory() {
@@ -413,6 +416,9 @@ public final class StudioScreen extends Screen {
 		java.util.Map<String, java.util.Map<String, Adjust>> adjust = SNAPSHOT_GSON.fromJson(back.adjust(), ADJUST_TYPE);
 		config.adjust = adjust == null ? new java.util.TreeMap<>() : new java.util.TreeMap<>(adjust);
 		config.partSize = new java.util.TreeMap<>(back.partSize());
+		java.util.Map<String, dev.itemstudio.Recolor> colours = SNAPSHOT_GSON.fromJson(back.recolor(),
+			new com.google.gson.reflect.TypeToken<java.util.TreeMap<String, dev.itemstudio.Recolor>>() {}.getType());
+		config.recolor = colours == null ? new java.util.TreeMap<>() : new java.util.TreeMap<>(colours);
 		changed(false);
 		setStatus("Undone" + (pending > 0 ? " - " + pending + " item" + (pending == 1 ? "" : "s") + " changed" : ""), pending > 0 ? WARN : MUTED);
 	}
@@ -898,7 +904,7 @@ public final class StudioScreen extends Screen {
 				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
 				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
 				String id = t.key;
-				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)) {
+				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id) || config.hasRecolor(id)) {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
@@ -1278,12 +1284,7 @@ public final class StudioScreen extends Screen {
 		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
 		outline(ctx, ix1, y, ix2, y + 56, pal.line());
 		String style = ready() ? styleOf(selected) : null;
-		boolean drawn = false;
-		if (ready() && style != null && index.get(style) != null) {
-			PackSource src = index.get(style);
-			Target shownItem = itemTarget(selected);
-			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, shownItem), ix1 + iw / 2 - 20, y + 8, 40);
-		}
+		boolean drawn = drawSidePreview(ctx, itemTarget(selected), style, ix1 + iw / 2 - 20, y + 8, 40);
 		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), ix1 + iw / 2 - 20, y + 8, 40);
 		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
@@ -1299,6 +1300,9 @@ public final class StudioScreen extends Screen {
 		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
 		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
 		y += 18;
+		fill(ctx, ix1, y, ix2, y + 1, pal.line());
+		y += 7;
+		y = drawColour(ctx, info.id, ix1, ix2, y, mouseX, mouseY);
 		fill(ctx, ix1, y, ix2, y + 1, pal.line());
 		y += 7;
 
@@ -1390,10 +1394,7 @@ public final class StudioScreen extends Screen {
 		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
 		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
 		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
-		boolean drawn = false;
-		if (src != null) {
-			drawn = drawPreview(ctx, src.id() + "|" + key, () -> previewOf(src, t), bx, by, box);
-		}
+		boolean drawn = drawSidePreview(ctx, t, style, bx, by, box);
 		if (!drawn) drawTargetIcon(ctx, t, bx, by, box);
 		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
@@ -1408,6 +1409,9 @@ public final class StudioScreen extends Screen {
 		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
 		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
 		y += 18;
+		fill(ctx, ix1, y, ix2, y + 1, pal.line());
+		y += 7;
+		y = drawColour(ctx, key, ix1, ix2, y, mouseX, mouseY);
 		fill(ctx, ix1, y, ix2, y + 1, pal.line());
 		y += 8;
 		if (resizable) {
@@ -1448,9 +1452,114 @@ public final class StudioScreen extends Screen {
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
+	/**
+	 * The big preview on the right: the chosen style with its colour change. Returns false when there is nothing
+	 * special to show (no style and no colour), so the caller draws the item itself.
+	 */
+	private boolean drawSidePreview(DrawContext ctx, Target t, String style, int x, int y, int size) {
+		dev.itemstudio.Recolor rc = config.hasRecolor(t.key) ? config.getRecolor(t.key) : null;
+		PackSource src = ready() && style != null ? index.get(style) : null;
+		if (src == null && rc == null) return false;
+		if (!ready()) return false;
+		String key = (src == null ? "below" : src.id()) + "|" + t.key + (rc == null ? "" : "|" + rc.key());
+		return drawPreview(ctx, key, () -> {
+			byte[] base = src != null ? previewOf(src, t) : basePreview(t, false);
+			return rc == null ? base : dev.itemstudio.pack.Recolors.apply(base, rc);
+		}, x, y, size);
+	}
+
+	private static final float[][] SWATCHES = {
+		{0, 0.85f, 0}, {28, 0.9f, 0}, {52, 0.9f, 0.05f}, {95, 0.8f, 0}, {140, 0.7f, -0.05f}, {182, 0.75f, 0},
+		{215, 0.85f, 0}, {250, 0.7f, 0}, {278, 0.75f, 0}, {322, 0.8f, 0.05f}, {0, 0f, 0.45f}, {0, 0f, -0.55f}};
+	private static final String[] SWATCH_NAMES = {"Red", "Orange", "Yellow", "Lime", "Green", "Aqua", "Blue", "Indigo",
+		"Purple", "Pink", "White", "Black"};
+
+	/** The colour controls for an item or part. Returns the y below them. */
+	private int drawColour(DrawContext ctx, String key, int ix1, int ix2, int y, int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		dev.itemstudio.Recolor current = config.getRecolor(key);
+		dev.itemstudio.Recolor rc = current == null ? new dev.itemstudio.Recolor() : current;
+		bold(ctx, "Colour", ix1, y, TEXT);
+		if (!rc.isDefault()) {
+			String resetLabel = "Reset";
+			int rw = textW(resetLabel);
+			boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
+			text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
+			hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+				config.recolor.remove(key);
+				changed(true);
+			}, null, "Original colours", null));
+		}
+		y += 13;
+		String[] modes = {dev.itemstudio.Recolor.OFF, dev.itemstudio.Recolor.RECOLOUR, dev.itemstudio.Recolor.TINT};
+		String[] labels = {"Off", "Recolour", "Tint"};
+		String[] tips = {"Original colours", "Keeps light and shadow, changes the colour",
+			"Multiplies by the colour: best for white things like crosshairs, glint and text"};
+		int gap = 3;
+		int segW = (iw - gap * 2) / 3;
+		for (int i = 0; i < 3; i++) {
+			int sx = ix1 + i * (segW + gap);
+			boolean on = modes[i].equals(rc.isDefault() ? dev.itemstudio.Recolor.OFF : rc.mode);
+			boolean hover = inside(mouseX, mouseY, sx, y, sx + segW, y + 13);
+			roundRect(ctx, sx, y, sx + segW, y + 13, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
+			if (!on) outline(ctx, sx, y, sx + segW, y + 13, pal.surfaceBorder());
+			String l = smallTrim(labels[i], segW - 4);
+			small(ctx, l, sx + (segW - smallW(l)) / 2, y + (pixelFont() ? 3 : 4), on ? 0xFFFFFFFF : TEXT2);
+			final String mode = modes[i];
+			hits.add(new Hit(sx, y, sx + segW, y + 13, () -> {
+				if (dev.itemstudio.Recolor.OFF.equals(mode)) config.recolor.remove(key);
+				else config.editRecolor(key).mode = mode;
+				changed(true);
+			}, null, tips[i], null));
+		}
+		y += 17;
+		if (rc.isDefault()) {
+			y = smallWrapped(ctx, "Pick Recolour or Tint, or a colour below.", ix1, y, iw, MUTED) + 2;
+			return drawSwatches(ctx, key, ix1, ix2, y, mouseX, mouseY);
+		}
+		y = drawSwatches(ctx, key, ix1, ix2, y, mouseX, mouseY);
+		final dev.itemstudio.Recolor edit = rc;
+		y = slider(ctx, "Hue", "°", 0f, 355f, 5f, 0f, () -> edit.hue, v -> config.editRecolor(key).hue = v,
+			ix1, ix2, y, mouseX, mouseY, 1f, p -> dev.itemstudio.pack.Recolors.swatch(p * 355f, 0.85f, 0f));
+		y = slider(ctx, "Saturation", "%", 0f, 1f, 0.05f, 0.75f, () -> edit.sat, v -> config.editRecolor(key).sat = v,
+			ix1, ix2, y, mouseX, mouseY, 100f, p -> dev.itemstudio.pack.Recolors.swatch(edit.hue, p, 0f));
+		y = slider(ctx, "Brightness", "%", -0.6f, 0.6f, 0.05f, 0f, () -> edit.bright, v -> config.editRecolor(key).bright = v,
+			ix1, ix2, y, mouseX, mouseY, 100f, p -> dev.itemstudio.pack.Recolors.swatch(edit.hue, edit.sat, -0.6f + p * 1.2f));
+		return y + 2;
+	}
+
+	/** Two rows of colour shortcuts. Returns the y below them. */
+	private int drawSwatches(DrawContext ctx, String key, int ix1, int ix2, int y, int mouseX, int mouseY) {
+		int gap = 3, perRow = 6;
+		int sw = (ix2 - ix1 - gap * (perRow - 1)) / perRow;
+		for (int i = 0; i < SWATCHES.length; i++) {
+			float[] c = SWATCHES[i];
+			int sx = ix1 + (i % perRow) * (sw + gap), sy = y + (i / perRow) * 13;
+			boolean hover = inside(mouseX, mouseY, sx, sy, sx + sw, sy + 10);
+			if (hover) outline(ctx, sx - 1, sy - 1, sx + sw + 1, sy + 11, 0xFFFFFFFF);
+			roundRect(ctx, sx, sy, sx + sw, sy + 10, dev.itemstudio.pack.Recolors.swatch(c[0], c[1], c[2]));
+			hits.add(new Hit(sx, sy, sx + sw, sy + 10, () -> {
+				dev.itemstudio.Recolor r = config.editRecolor(key);
+				if (r.isDefault()) r.mode = dev.itemstudio.Recolor.RECOLOUR;
+				r.hue = c[0];
+				r.sat = c[1];
+				r.bright = c[2];
+				changed(true);
+			}, null, SWATCH_NAMES[i], null));
+		}
+		return y + 2 * 13 + 3;
+	}
+
 	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
 	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
 	                   float displayMul) {
+		return slider(ctx, label, unit, min, max, step, def, get, set, barX1, barX2, y, mouseX, mouseY, displayMul, null);
+	}
+
+	/** A slider; track (when given) colours the bar: position 0-1 -> ARGB. */
+	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
+	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
+	                   float displayMul, java.util.function.Function<Float, Integer> track) {
 		float value = get.get();
 		boolean changedValue = Math.abs(value - def) > 1e-4f;
 		text(ctx, label, barX1, y, changedValue ? TEXT : TEXT2);
@@ -1459,12 +1568,18 @@ public final class StudioScreen extends Screen {
 		text(ctx, shown, barX2 - textW(shown), y, changedValue ? pal.accentText() : MUTED);
 
 		int by = y + 12;
-		roundRect(ctx, barX1, by, barX2, by + 3, pal.track());
 		float t = (value - min) / (max - min);
 		float t0 = (def - min) / (max - min);
 		int kx = barX1 + Math.round(t * (barX2 - barX1));
 		int zx = barX1 + Math.round(t0 * (barX2 - barX1));
-		fill(ctx, Math.min(kx, zx), by, Math.max(kx, zx), by + 3, pal.accent());
+		if (track != null) {
+			for (int bx = barX1; bx < barX2; bx += 2) {
+				fill(ctx, bx, by, Math.min(barX2, bx + 2), by + 3, track.apply((bx - barX1) / (float) Math.max(1, barX2 - barX1)));
+			}
+		} else {
+			roundRect(ctx, barX1, by, barX2, by + 3, pal.track());
+			fill(ctx, Math.min(kx, zx), by, Math.max(kx, zx), by + 3, pal.accent());
+		}
 		boolean hover = inside(mouseX, mouseY, barX1 - 3, y, barX2 + 3, y + 17) || dragging != null && dragging.label.equals(label);
 		if (hover) roundRect(ctx, kx - 5, by - 3, kx + 5, by + 6, pal.glow());
 		roundRect(ctx, kx - 3, by - 2, kx + 3, by + 5, 0xFFFFFFFF);

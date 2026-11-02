@@ -11,6 +11,8 @@ import dev.itemstudio.StudioConfig;
 import dev.itemstudio.View;
 import dev.itemstudio.pack.TexturePart;
 import dev.itemstudio.pack.TextureScaler;
+import dev.itemstudio.pack.Recolors;
+import dev.itemstudio.Recolor;
 import dev.itemstudio.pack.ItemInfo;
 import dev.itemstudio.pack.PackIndex;
 import dev.itemstudio.pack.PackSource;
@@ -69,6 +71,7 @@ public final class PackBuilder {
 		items.addAll(config.styles.keySet());
 		items.addAll(config.adjust.keySet());
 		items.addAll(config.partSize.keySet());
+		items.addAll(config.recolor.keySet());
 		for (String itemId : items) {
 			if (TexturePart.byKey(itemId) != null) {
 				buildPart(itemId);
@@ -98,13 +101,15 @@ public final class PackBuilder {
 		String styleId = config.styles.get(key);
 		float size = config.partSizeOf(key);
 		boolean resized = element.resizable() && Math.abs(size - 1f) > 1e-3f;
-		if (styleId == null && !resized) return;
+		Recolor colour = config.hasRecolor(key) ? config.getRecolor(key) : null;
+		boolean rebuild = resized || colour != null;
+		if (styleId == null && !rebuild) return;
 		PackSource source = styleId == null ? null : index.get(styleId);
 		if (styleId != null && source == null) {
 			problems.add(element.label() + ": pack \"" + styleId + "\" is gone");
-			if (!resized) return;
+			if (!rebuild) return;
 		}
-		if (!resized) {
+		if (!rebuild) {
 			for (String file : index.partFiles(source, element)) {
 				try {
 					out.put(file, source.read(file));
@@ -127,12 +132,13 @@ public final class PackBuilder {
 					meta = Resources.readBelow(file + ".mcmeta");
 				}
 				if (png == null) continue;
-				TextureScaler.Result scaled = TextureScaler.scale(png, meta, size);
+				if (colour != null) png = Recolors.apply(png, colour);
+				TextureScaler.Result scaled = resized ? TextureScaler.scale(png, meta, size) : null;
 				out.put(file, scaled == null ? png : scaled.png());
 				byte[] outMeta = scaled == null ? meta : scaled.mcmeta();
 				if (outMeta != null) out.put(file + ".mcmeta", outMeta);
 			} catch (Exception e) {
-				problems.add(element.label() + ": could not resize " + file);
+				problems.add(element.label() + ": could not change " + file);
 			}
 		}
 	}
@@ -144,7 +150,8 @@ public final class PackBuilder {
 			problems.add(info.id + ": pack \"" + styleId + "\" is gone");
 		}
 		boolean adjusted = config.hasAdjust(info.id);
-		if (source == null && !adjusted) return;
+		Recolor colour = config.hasRecolor(info.id) ? config.getRecolor(info.id) : null;
+		if (source == null && !adjusted && colour == null) return;
 
 		String defFile = Refs.itemDefFile(info.id);
 		JsonElement def;
@@ -190,6 +197,55 @@ public final class PackBuilder {
 		if (defChanged) {
 			put(defFile, def);
 		}
+		if (colour != null) recolourItem(info, def, colour);
+	}
+
+	/**
+	 * Recolours every texture the item ends up using: the models its (final) definition points at, their parents,
+	 * and its entity/armor textures. Files already in the generated pack are changed there; the rest are taken from
+	 * what the game uses now and written to the same place.
+	 */
+	private void recolourItem(ItemInfo info, JsonElement def, Recolor colour) {
+		Set<String> files = new LinkedHashSet<>();
+		List<String> models = new ArrayList<>();
+		Refs.collectDefModels(def, models);
+		Set<String> seen = new java.util.HashSet<>();
+		for (String model : models) collectModelTextures(model, files, seen, 0);
+		files.addAll(info.extraTextures);
+		for (String file : files) {
+			String path = cleanPath(file);
+			byte[] png = out.get(path);
+			if (png == null) png = Resources.readBelow(file);
+			if (png == null) continue;
+			out.put(path, Recolors.apply(png, colour));
+			if (!out.containsKey(path + ".mcmeta")) {
+				// the game reads the animation info from the same pack as the picture
+				byte[] meta = Resources.readBelow(file + ".mcmeta");
+				if (meta != null) out.put(path + ".mcmeta", meta);
+			}
+		}
+	}
+
+	private void collectModelTextures(String ref, Set<String> files, Set<String> seen, int depth) {
+		if (ref == null || depth > 32 || ref.startsWith("minecraft:builtin/") || !seen.add(ref)) return;
+		JsonObject model = loadModel(ref);
+		if (model == null) return;
+		if (model.has("textures") && model.get("textures").isJsonObject()) {
+			JsonObject textures = model.getAsJsonObject("textures");
+			for (String key : textures.keySet()) {
+				String tex = Refs.textureRef(textures.get(key));
+				if (tex != null) files.add(Refs.textureFile(tex));
+			}
+		}
+		JsonArray overrides = Refs.overrides(model);
+		if (overrides != null) {
+			for (JsonElement o : overrides) {
+				if (o.isJsonObject() && o.getAsJsonObject().has("model")) {
+					collectModelTextures(Refs.full(o.getAsJsonObject().get("model").getAsString()), files, seen, depth + 1);
+				}
+			}
+		}
+		collectModelTextures(Refs.parentOf(model), files, seen, depth + 1);
 	}
 
 	// ---------------------------------------------------------------- size / position
