@@ -42,6 +42,27 @@ public final class StudioConfig {
 	/** Particle size per part key ("particle:crit"): 1 = normal size. */
 	public Map<String, Float> partSize = new TreeMap<>();
 
+	/** A saved set of choices: what is styled, size changes and particle sizes. */
+	public static final class Profile {
+		public Map<String, String> styles = new TreeMap<>();
+		public Map<String, Map<String, Adjust>> adjust = new TreeMap<>();
+		public Map<String, Float> partSize = new TreeMap<>();
+
+		public int count() {
+			java.util.Set<String> keys = new java.util.HashSet<>(styles.keySet());
+			keys.addAll(adjust.keySet());
+			keys.addAll(partSize.keySet());
+			return keys.size();
+		}
+	}
+
+	/**
+	 * Saved setups by name, in the order they were made. The active one is also what styles, adjust and partSize
+	 * hold; it is copied back here every time the config is saved.
+	 */
+	public Map<String, Profile> profiles = new java.util.LinkedHashMap<>();
+	public String activeProfile = "Main";
+
 	// Style browsing
 	public java.util.Set<String> favorites = new java.util.TreeSet<>();
 	/** Most recently picked packs first. */
@@ -51,6 +72,7 @@ public final class StudioConfig {
 	public static StudioConfig get() {
 		if (instance == null) {
 			instance = load();
+			instance.storeActive(); // a fresh config starts with one profile
 		}
 		return instance;
 	}
@@ -71,6 +93,11 @@ public final class StudioConfig {
 					config.partSize = new TreeMap<>(config.partSize);
 					config.styles = new TreeMap<>(config.styles);
 					config.adjust = new TreeMap<>(config.adjust);
+					if (config.profiles == null) config.profiles = new java.util.LinkedHashMap<>();
+					config.profiles = new java.util.LinkedHashMap<>(config.profiles);
+					config.profiles.values().removeIf(java.util.Objects::isNull);
+					if (config.activeProfile == null || config.activeProfile.isBlank()) config.activeProfile = "Main";
+					config.storeActive();
 					return config;
 				}
 			} catch (Exception e) {
@@ -81,6 +108,7 @@ public final class StudioConfig {
 	}
 
 	public void save() {
+		storeActive();
 		Path path = file();
 		try {
 			Files.createDirectories(path.getParent());
@@ -109,6 +137,51 @@ public final class StudioConfig {
 	/** Returns the adjust for editing, creating it if needed. */
 	public Adjust editAdjust(String itemId, View view) {
 		return adjust.computeIfAbsent(itemId, k -> new TreeMap<>()).computeIfAbsent(view.key, k -> new Adjust());
+	}
+
+	/** A copy of the current choices. */
+	public Profile currentProfile() {
+		Profile p = new Profile();
+		p.styles = new TreeMap<>(styles);
+		p.adjust = copyAdjust(adjust);
+		p.partSize = new TreeMap<>(partSize);
+		return p;
+	}
+
+	/** Copies the current choices into the active profile. */
+	public void storeActive() {
+		profiles.put(activeProfile, currentProfile());
+	}
+
+	/** Makes a saved profile the current choices. Doesn't save or apply. */
+	public void loadProfile(String name) {
+		Profile p = profiles.get(name);
+		if (p == null) return;
+		activeProfile = name;
+		styles = new TreeMap<>(p.styles == null ? Map.of() : p.styles);
+		adjust = copyAdjust(p.adjust == null ? Map.of() : p.adjust);
+		partSize = new TreeMap<>(p.partSize == null ? Map.of() : p.partSize);
+	}
+
+	/** base, or "base 2", "base 3"... whichever is free. */
+	public String uniqueProfileName(String base) {
+		String name = base;
+		for (int i = 2; profiles.containsKey(name); i++) name = base + " " + i;
+		return name;
+	}
+
+	/** Renames a profile, keeping its place in the list. */
+	public void renameProfile(String from, String to) {
+		Map<String, Profile> renamed = new java.util.LinkedHashMap<>();
+		profiles.forEach((k, v) -> renamed.put(k.equals(from) ? to : k, v));
+		profiles = renamed;
+		if (activeProfile.equals(from)) activeProfile = to;
+	}
+
+	private static Map<String, Map<String, Adjust>> copyAdjust(Map<String, Map<String, Adjust>> from) {
+		Map<String, Map<String, Adjust>> copy = GSON.fromJson(GSON.toJson(from),
+			new com.google.gson.reflect.TypeToken<TreeMap<String, TreeMap<String, Adjust>>>() {}.getType());
+		return copy == null ? new TreeMap<>() : new TreeMap<>(copy);
 	}
 
 	public String fontId() {
