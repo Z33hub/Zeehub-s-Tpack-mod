@@ -38,27 +38,72 @@ public final class PackWriter {
 		return Minecraft.getInstance().getResourcePackDirectory().resolve(Resources.GENERATED_FOLDER);
 	}
 
+	public enum Result { FAILED, UNCHANGED, CHANGED }
+
 	/** Replaces the generated pack's files. Returns false if writing failed. */
 	public static boolean write(Map<String, byte[]> files) {
+		return writeChanges(files) != Result.FAILED;
+	}
+
+	/**
+	 * Makes the generated pack folder hold exactly these files, touching only what differs: files that are already
+	 * the same are left alone and leftovers are deleted. UNCHANGED means nothing on disk changed, so the game
+	 * doesn't need to reload.
+	 */
+	public static Result writeChanges(Map<String, byte[]> files) {
 		Path dir = folder();
 		try {
-			deleteTree(dir);
-			if (files.isEmpty()) return true;
-			Files.createDirectories(dir);
-			Files.writeString(dir.resolve("pack.mcmeta"), PACK_MCMETA, StandardCharsets.UTF_8);
+			if (files.isEmpty()) {
+				boolean existed = Files.exists(dir);
+				deleteTree(dir);
+				return existed ? Result.CHANGED : Result.UNCHANGED;
+			}
+			Map<String, byte[]> all = new java.util.LinkedHashMap<>(files);
+			all.put("pack.mcmeta", PACK_MCMETA.getBytes(StandardCharsets.UTF_8));
 			try (InputStream icon = PackWriter.class.getResourceAsStream("/assets/itemstudio/icon.png")) {
-				if (icon != null) Files.write(dir.resolve("pack.png"), icon.readAllBytes());
+				if (icon != null) all.put("pack.png", icon.readAllBytes());
 			}
-			for (Map.Entry<String, byte[]> entry : files.entrySet()) {
-				Path target = dir.resolve(entry.getKey());
-				if (!target.normalize().startsWith(dir)) continue; // never write outside the pack folder
+			java.util.Set<Path> leftover = new java.util.HashSet<>();
+			if (Files.isDirectory(dir)) {
+				try (Stream<Path> walk = Files.walk(dir)) {
+					walk.filter(Files::isRegularFile).forEach(p -> leftover.add(p.normalize()));
+				}
+			}
+			boolean changed = false;
+			Files.createDirectories(dir);
+			for (Map.Entry<String, byte[]> entry : all.entrySet()) {
+				Path target = dir.resolve(entry.getKey()).normalize();
+				if (!target.startsWith(dir.normalize())) continue; // never write outside the pack folder
+				leftover.remove(target);
+				byte[] bytes = entry.getValue();
+				if (Files.isRegularFile(target) && Files.size(target) == bytes.length
+					&& java.util.Arrays.equals(Files.readAllBytes(target), bytes)) {
+					continue;
+				}
 				Files.createDirectories(target.getParent());
-				Files.write(target, entry.getValue());
+				Files.write(target, bytes);
+				changed = true;
 			}
-			return true;
+			for (Path old : leftover) {
+				Files.deleteIfExists(old);
+				changed = true;
+			}
+			if (changed) removeEmptyFolders(dir);
+			return changed ? Result.CHANGED : Result.UNCHANGED;
 		} catch (IOException e) {
 			ItemStudioClient.LOG.error("Could not write the generated pack", e);
-			return false;
+			return Result.FAILED;
+		}
+	}
+
+	private static void removeEmptyFolders(Path dir) throws IOException {
+		try (Stream<Path> walk = Files.walk(dir)) {
+			for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
+				if (p.equals(dir) || !Files.isDirectory(p)) continue;
+				try (Stream<Path> inside = Files.list(p)) {
+					if (inside.findAny().isEmpty()) Files.deleteIfExists(p);
+				}
+			}
 		}
 	}
 
@@ -72,6 +117,11 @@ public final class PackWriter {
 	 * then reloads resources. The returned future finishes when the reload is done.
 	 */
 	public static CompletableFuture<Void> enableAndReload(boolean hasFiles) {
+		return enableAndReload(hasFiles, true);
+	}
+
+	/** Same, but skips the (slow) reload when no file changed and the pack list is the same. */
+	public static CompletableFuture<Void> enableAndReload(boolean hasFiles, boolean filesChanged) {
 		Minecraft client = Minecraft.getInstance();
 		PackRepository manager = client.getResourcePackRepository();
 		manager.reload();
@@ -86,6 +136,7 @@ public final class PackWriter {
 		List<String> before = new ArrayList<>(client.options.resourcePacks);
 		client.options.updateResourcePacks(manager); // saves options and reloads if the list changed
 		if (before.equals(client.options.resourcePacks)) {
+			if (!filesChanged) return CompletableFuture.completedFuture(null);
 			return client.reloadResourcePacks();
 		}
 		// refreshResourcePacks already started a reload; wait for it by queueing behind it.

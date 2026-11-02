@@ -15,7 +15,7 @@ import java.util.Set;
 
 /** What files make up an item in vanilla: its definition, its models and the textures they use. */
 public final class ItemInfo {
-	private static final Map<String, ItemInfo> CACHE = new HashMap<>();
+	private static final Map<String, ItemInfo> CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
 	public final Item item;
 	public final String id;
@@ -50,12 +50,23 @@ public final class ItemInfo {
 		}
 	}
 
+	private static final Map<Item, ItemInfo> BY_ITEM = new java.util.concurrent.ConcurrentHashMap<>();
+
 	public static ItemInfo of(Item item) {
+		ItemInfo known = BY_ITEM.get(item);
+		if (known != null) return known;
+		ItemInfo info = lookup(item);
+		BY_ITEM.put(item, info);
+		return info;
+	}
+
+	private static ItemInfo lookup(Item item) {
 		String key = BuiltInRegistries.ITEM.getKey(item).toString();
 		return CACHE.computeIfAbsent(key, k -> new ItemInfo(item));
 	}
 
 	public static void clearCache() {
+		BY_ITEM.clear();
 		CACHE.clear();
 	}
 

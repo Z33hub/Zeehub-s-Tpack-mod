@@ -164,6 +164,7 @@ public final class StudioScreen extends Screen {
 		if (index == null && loading == null) startScan("Loading packs...");
 		if (applied == null) applied = snapshot();
 		if (history.isEmpty()) pushHistory();
+		previews.newSession();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 
 		px = 6;
@@ -235,8 +236,14 @@ public final class StudioScreen extends Screen {
 
 	private final Map<String, FontDescription.Resource> fontCache = new HashMap<>();
 
+	/** The menu font for this frame, so it isn't looked up for every piece of text. */
+	private MenuFont frameFont;
+	/** Text widths and shortened texts, for the current font. Cleared when the font changes. */
+	private final Map<String, Integer> widthCache = new HashMap<>();
+	private final Map<String, String> trimCache = new HashMap<>();
+
 	private MenuFont menuFont() {
-		return MenuFont.byId(config.fontId());
+		return frameFont != null ? frameFont : MenuFont.byId(config.fontId());
 	}
 
 	private FontDescription.Resource fontOf(MenuFont f, boolean bold) {
@@ -257,19 +264,39 @@ public final class StudioScreen extends Screen {
 	}
 
 	private int textW(String s) {
-		return font.width(styled(s, false));
+		Integer w = widthCache.get(s);
+		if (w == null) {
+			w = font.width(styled(s, false));
+			widthCache.put(s, w);
+		}
+		return w;
 	}
 
 	private int boldW(String s) {
-		return font.width(styled(s, true));
+		String key = "\u0001" + s;
+		Integer w = widthCache.get(key);
+		if (w == null) {
+			w = font.width(styled(s, true));
+			widthCache.put(key, w);
+		}
+		return w;
 	}
 
+	/** Shortens text with "..." to fit max pixels. */
 	private String trim(String s, int max) {
 		if (textW(s) <= max) return s;
-		String dots = "...";
-		int end = s.length();
-		while (end > 0 && textW(s.substring(0, end) + dots) > max) end--;
-		return s.substring(0, end).trim() + dots;
+		String key = max + "\u0000" + s;
+		String cached = trimCache.get(key);
+		if (cached != null) return cached;
+		int lo = 0, hi = s.length();
+		while (lo < hi) {
+			int mid = (lo + hi + 1) / 2;
+			if (textW(s.substring(0, mid) + "...") <= max) lo = mid;
+			else hi = mid - 1;
+		}
+		String result = s.substring(0, lo).trim() + "...";
+		trimCache.put(key, result);
+		return result;
 	}
 
 	private void text(GuiGraphicsExtractor ctx, String s, int x, int y, int color) {
@@ -449,24 +476,66 @@ public final class StudioScreen extends Screen {
 		}
 	}
 
+	/** An apply is building in the background / another one was asked for meanwhile. */
+	private boolean applying, applyAgain;
+	/** Shown instead of "Applied" when the apply finishes (e.g. "Switched to Crystal"). */
+	private String applyNote;
+	private int applyNoteColor = GOOD;
+
+	private record Built(PackBuilder builder, PackWriter.Result written) {
+	}
+
+	private java.util.concurrent.Executor gameThread() {
+		return minecraft;
+	}
+
+	/**
+	 * Builds the pack in the background (from a copy of the choices, so the menu stays usable), writes only what
+	 * changed, then turns it on and reloads on the game thread. Skips the reload when nothing changed.
+	 */
 	private void apply() {
 		config.cleanUp();
 		config.save();
-		PackBuilder builder = new PackBuilder(config, indexNow()).build();
-		if (!PackWriter.write(builder.files())) {
-			setStatus("Could not write the pack - see the game log", WARN);
+		if (applying) {
+			applyAgain = true;
 			return;
 		}
-		pending = 0;
-		applied = snapshot();
-		if (!config.enabled) {
-			setStatus("Saved - Item Studio is off, turn it on in Settings to see it", WARN);
-		} else if (builder.problems().isEmpty()) {
-			setStatus("Applied", GOOD);
-		} else {
-			setStatus("Applied with " + builder.problems().size() + " problem(s): " + builder.problems().get(0), WARN);
-		}
-		PackWriter.enableAndReload(!builder.files().isEmpty());
+		PackIndex idx = indexNow();
+		StudioConfig choices = config.copyForBuild();
+		Map<String, String> applying_ = snapshot();
+		String note = applyNote;
+		int noteColor = applyNoteColor;
+		applyNote = null;
+		applyNoteColor = GOOD;
+		applying = true;
+		setStatus("Applying...", MUTED);
+		CompletableFuture.supplyAsync(() -> {
+			PackBuilder builder = new PackBuilder(choices, idx).build();
+			return new Built(builder, PackWriter.writeChanges(builder.files()));
+		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((built, error) -> {
+			applying = false;
+			if (error != null || built.written() == PackWriter.Result.FAILED) {
+				if (error != null) ItemStudioClient.LOG.error("Could not apply", error);
+				setStatus("Could not write the pack - see the game log", WARN);
+			} else {
+				applied = applying_;
+				pending = countPending();
+				PackBuilder builder = built.builder();
+				if (!config.enabled) {
+					setStatus("Saved - Item Studio is off, turn it on in Settings to see it", WARN);
+				} else if (builder.problems().isEmpty()) {
+					if (note != null) setStatus(note, noteColor);
+					else setStatus(built.written() == PackWriter.Result.UNCHANGED ? "Applied - nothing to reload" : "Applied", GOOD);
+				} else {
+					setStatus("Applied with " + builder.problems().size() + " problem(s): " + builder.problems().get(0), WARN);
+				}
+				PackWriter.enableAndReload(!builder.files().isEmpty(), built.written() == PackWriter.Result.CHANGED);
+			}
+			if (applyAgain) {
+				applyAgain = false;
+				apply();
+			}
+		}, gameThread());
 	}
 
 	private void rescan() {
@@ -485,15 +554,20 @@ public final class StudioScreen extends Screen {
 		}
 	}
 
+	private final Map<Item, Target> itemTargets = new HashMap<>();
+	private final Map<TexturePart, Target> partTargets = new HashMap<>();
+	private String tilesKey;
+	private List<Target> tilesCache = List.of();
+
 	private Target itemTarget(Item item) {
-		return new Target(BuiltInRegistries.ITEM.getKey(item).toString(), item, null);
+		return itemTargets.computeIfAbsent(item, i -> new Target(BuiltInRegistries.ITEM.getKey(i).toString(), i, null));
 	}
 
 	private Target partTarget(TexturePart element) {
-		return new Target(element.key(), null, element);
+		return partTargets.computeIfAbsent(element, e -> new Target(e.key(), null, e));
 	}
 
-	private final Map<TexturePart, Item> partItems = new HashMap<>();
+	private final Map<TexturePart, Item> partItems = new java.util.concurrent.ConcurrentHashMap<>();
 
 	/** The item that shows a part in 3D (a block's item), or null. */
 	private Item partItem(TexturePart part) {
@@ -517,12 +591,16 @@ public final class StudioScreen extends Screen {
 
 	/** The tiles in the row at the top. */
 	private List<Target> tiles() {
+		String key = category + "|" + query;
+		if (key.equals(tilesKey)) return tilesCache;
 		List<Target> list = new ArrayList<>();
 		if (partMode()) {
 			for (TexturePart e : category.parts()) list.add(partTarget(e));
 		} else {
 			for (Item item : gridItems()) list.add(itemTarget(item));
 		}
+		tilesKey = key;
+		tilesCache = list;
 		return list;
 	}
 
@@ -724,6 +802,13 @@ public final class StudioScreen extends Screen {
 		hits.clear();
 		scrollAreas.clear();
 		crossShown = false;
+		previews.beginFrame();
+		MenuFont font = MenuFont.byId(config.fontId());
+		if (font != frameFont || widthCache.size() > 20000 || trimCache.size() > 20000) {
+			widthCache.clear();
+			trimCache.clear();
+			frameFont = font;
+		}
 		pal = theme().palette(config.opacity);
 		int generation = dev.itemstudio.pack.PackIndexCache.generation();
 		if (generation != previewGeneration || previews.size() > 3000) {
@@ -1036,11 +1121,65 @@ public final class StudioScreen extends Screen {
 		return b.toString();
 	}
 
+	/** Background comparisons already started, by scan generation and target. */
+	private static final Map<String, CompletableFuture<Void>> WARM = new java.util.concurrent.ConcurrentHashMap<>();
+	private String cardsKey;
+	private List<Card> cardsCache = List.of();
+
+	/**
+	 * Comparing packs means reading and hashing their files, which can take a moment when many packs change the
+	 * same item. That runs in the background; this says whether it's finished.
+	 */
+	private boolean warmed(String key, List<Target> targets) {
+		String k = dev.itemstudio.pack.PackIndexCache.generation() + "|" + key;
+		CompletableFuture<Void> job = WARM.get(k);
+		if (job == null) {
+			PackIndex idx = index;
+			List<FilePackSource> all = idx.packs();
+			job = CompletableFuture.runAsync(() -> {
+				for (Target t : targets) {
+					for (FilePackSource p : all) {
+						if (t.isPart()) {
+							if (idx.partFiles(p, t.part).isEmpty()) continue;
+							idx.partFingerprint(p, t.part);
+							idx.partSameAsBelow(p, t.part);
+						} else {
+							ItemInfo info = ItemInfo.of(t.item);
+							if (!idx.provided(p, info).any()) continue;
+							idx.fingerprint(p, info);
+							idx.sameAsBelow(p, info);
+						}
+					}
+				}
+			}, dev.itemstudio.Workers.BACKGROUND);
+			WARM.put(k, job);
+		}
+		return job.isDone();
+	}
+
 	private void drawCards(GuiGraphicsExtractor ctx, Target t, int x, int top, int w, int bottom, int mouseX, int mouseY) {
 		String main = mainFile(t);
 		String current = styleOf(t.key);
 		List<FilePackSource> packs = packsFor(t);
+		if (packs.size() > 4 && !warmed(t.key, List.of(t))) {
+			text(ctx, "Comparing " + packs.size() + " packs...", x, top + 4, MUTED);
+			drawLoading(ctx, x + textW("Comparing " + packs.size() + " packs...") + 12, top + 7);
+			return;
+		}
+		String cacheKey = t.key + "|" + current + "|" + styleQuery + "|" + filter + "|" + config.sortZtoA + "|"
+			+ config.favorites.hashCode() + "|" + config.recent.hashCode() + "|" + dev.itemstudio.pack.PackIndexCache.generation();
+		List<Card> cards;
+		if (cacheKey.equals(cardsKey)) {
+			cards = cardsCache;
+		} else {
+			cards = buildCards(t, current, packs);
+			cardsKey = cacheKey;
+			cardsCache = cards;
+		}
+		drawCardGrid(ctx, t, cards, packs, current, x, top, w, bottom, mouseX, mouseY);
+	}
 
+	private List<Card> buildCards(Target t, String current, List<FilePackSource> packs) {
 		// Packs whose files are exactly what the game already shows fold into "Default";
 		// packs with identical files for this item become one card.
 		List<FilePackSource> likeDefault = new ArrayList<>();
@@ -1075,7 +1214,11 @@ public final class StudioScreen extends Screen {
 			cards.add(new Card(shown.id(), ids, shown.displayName(), sub, tip + " - right-click to favorite",
 				() -> previewOf(preview, t), shown.id() + "|" + t.key));
 		}
+		return cards;
+	}
 
+	private void drawCardGrid(GuiGraphicsExtractor ctx, Target t, List<Card> cards, List<FilePackSource> packs, String current,
+	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
 		int gap = 6;
 		int minCard = config.cardSize <= 0 ? 46 : config.cardSize >= 2 ? 80 : 58;
 		int cols = Math.max(2, (w + gap) / (minCard + gap));
@@ -1110,7 +1253,8 @@ public final class StudioScreen extends Screen {
 			roundRect(ctx, cx + 4, cy + 4, cx + 4 + prev, cy + 4 + prev, pal.well());
 			int img = prev - 10;
 			if (!drawPreview(ctx, card.imageKey, card.image, cx + 9, cy + 9, img)) {
-				drawTargetIcon(ctx, t, cx + 9, cy + 9, img);
+				if (previews.isLoading(card.imageKey)) drawLoading(ctx, cx + 4 + prev / 2, cy + 4 + prev / 2);
+				else drawTargetIcon(ctx, t, cx + 9, cy + 9, img);
 			}
 			// name on up to two lines, then the kind of change
 			String[] lines = twoLines(card.name, cardW - 8);
@@ -1180,8 +1324,28 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** One pack for all: a row per pack showing which items of the group it changes. */
+	private String bulkKey;
+	private List<List<FilePackSource>> bulkRows = List.of();
+	private Map<String, int[]> bulkCounts = Map.of();
+
 	private void drawBulk(GuiGraphicsExtractor ctx, int x, int top, int w, int bottom, int mouseX, int mouseY) {
 		List<Target> items = groupTargets();
+		if (!warmed("bulk:" + category, items)) {
+			text(ctx, "Comparing your packs for every " + category.label.toLowerCase(Locale.ROOT) + " item...", x, top + 4, MUTED);
+			return;
+		}
+		String cacheKey = category + "|" + styleQuery + "|" + filter + "|" + config.sortZtoA + "|" + config.favorites.hashCode()
+			+ "|" + config.recent.hashCode() + "|" + dev.itemstudio.pack.PackIndexCache.generation();
+		if (!cacheKey.equals(bulkKey)) {
+			buildBulkRows(items);
+			bulkKey = cacheKey;
+		}
+		List<List<FilePackSource>> rows = bulkRows;
+		Map<String, int[]> counts = bulkCounts;
+		drawBulkRows(ctx, items, rows, counts, x, top, w, bottom, mouseX, mouseY);
+	}
+
+	private void buildBulkRows(List<Target> items) {
 		Map<String, List<FilePackSource>> groups = new LinkedHashMap<>();
 		Map<String, int[]> counts = new HashMap<>();
 		for (FilePackSource pack : index.packs()) {
@@ -1197,8 +1361,12 @@ public final class StudioScreen extends Screen {
 			counts.put(pack.id(), new int[]{count});
 			groups.computeIfAbsent(look.toString(), k -> new ArrayList<>()).add(pack);
 		}
-		List<List<FilePackSource>> rows = arrange(new ArrayList<>(groups.values()), g -> g);
+		bulkRows = arrange(new ArrayList<>(groups.values()), g -> g);
+		bulkCounts = counts;
+	}
 
+	private void drawBulkRows(GuiGraphicsExtractor ctx, List<Target> items, List<List<FilePackSource>> rows, Map<String, int[]> counts,
+	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
 		int rowH = 34, gap = 5;
 		int content = rows.size() * (rowH + gap) + 22;
 		int off = scrollOf("cards", content, bottom - top);
@@ -1850,7 +2018,7 @@ public final class StudioScreen extends Screen {
 			else if (hover) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.surfaceHover());
 			if (active) drawCheck(ctx, x + 8, ry + 4, pal.accentText());
 			StudioConfig.Profile saved = config.profiles.get(name);
-			int n = active ? config.currentProfile().count() : saved == null ? 0 : saved.count();
+			int n = active ? config.currentCount() : saved == null ? 0 : saved.count();
 			String changes = n == 0 ? "empty" : n + " changed";
 			int cw = smallW(changes);
 			if (active && renamingProfile) {
@@ -1907,19 +2075,24 @@ public final class StudioScreen extends Screen {
 			return;
 		}
 		config.cleanUp();
-		PackBuilder builder = new PackBuilder(config, indexNow()).build();
-		if (builder.files().isEmpty()) {
-			setStatus("Nothing to export - " + config.activeProfile + " doesn't change anything", WARN);
-			return;
-		}
-		java.nio.file.Path zip = PackWriter.exportZip(builder.files(), config.activeProfile);
-		if (zip == null) {
-			setStatus("Could not export - see the game log", WARN);
-			return;
-		}
-		setStatus("Exported " + zip.getFileName() + " - works without the mod", GOOD);
-		java.nio.file.Path exportDir = PackWriter.exportFolder();
-		Util.getPlatform().openUri(exportDir.toUri());
+		PackIndex idx = indexNow();
+		StudioConfig choices = config.copyForBuild();
+		String name = config.activeProfile;
+		setStatus("Exporting " + name + "...", MUTED);
+		CompletableFuture.supplyAsync(() -> {
+			PackBuilder builder = new PackBuilder(choices, idx).build();
+			return builder.files().isEmpty() ? null : java.util.Optional.ofNullable(PackWriter.exportZip(builder.files(), name));
+		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((zip, error) -> {
+			if (error == null && zip == null) {
+				setStatus("Nothing to export - " + name + " doesn't change anything", WARN);
+			} else if (error != null || zip.isEmpty()) {
+				setStatus("Could not export - see the game log", WARN);
+			} else {
+				setStatus("Exported " + zip.get().getFileName() + " - works without the mod", GOOD);
+				java.nio.file.Path exportDir = PackWriter.exportFolder();
+				Util.getPlatform().openUri(exportDir.toUri());
+			}
+		}, gameThread());
 	}
 
 	private void closeProfiles() {
@@ -1936,8 +2109,11 @@ public final class StudioScreen extends Screen {
 		config.save();
 		history.clear();
 		pushHistory();
+		if (applyNote == null) {
+			applyNote = "Switched to " + name;
+			applyNoteColor = GOOD;
+		}
 		apply();
-		if (statusColor == GOOD) setStatus("Switched to " + name, GOOD);
 	}
 
 	private void newProfile(boolean copy) {
@@ -2000,8 +2176,9 @@ public final class StudioScreen extends Screen {
 		config.save();
 		history.clear();
 		pushHistory();
+		applyNote = "Deleted " + gone + ", now using " + next;
+		applyNoteColor = GOOD;
 		apply();
-		setStatus("Deleted " + gone + ", now using " + next, GOOD);
 	}
 
 	private void copyProfileCode() {
@@ -2025,10 +2202,15 @@ public final class StudioScreen extends Screen {
 		config.storeActive();
 		String name = config.uniqueProfileName(decoded.name());
 		config.profiles.put(name, decoded.profile());
+		if (missing.isEmpty()) {
+			applyNote = "Added " + name + " from the code";
+			applyNoteColor = GOOD;
+		} else {
+			applyNote = "Added " + name + " - " + missing.size() + " pack" + (missing.size() == 1 ? "" : "s")
+				+ " not in your folder: " + String.join(", ", missing);
+			applyNoteColor = WARN;
+		}
 		switchProfile(name);
-		if (missing.isEmpty()) setStatus("Added " + name + " from the code", GOOD);
-		else setStatus("Added " + name + " - " + missing.size() + " pack" + (missing.size() == 1 ? "" : "s")
-			+ " not in your folder: " + String.join(", ", missing), WARN);
 	}
 
 	private void drawFooter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
@@ -2179,6 +2361,15 @@ public final class StudioScreen extends Screen {
 		roundRect(ctx, x, y, x + 16, y + 16, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
 		if (!on) outline(ctx, x, y, x + 16, y + 16, pal.surfaceBorder());
 		hits.add(new Hit(x, y, x + 16, y + 16, action, null, tooltip, null));
+	}
+
+	/** Three dots that light up in turn, for pictures still being made. */
+	private void drawLoading(GuiGraphicsExtractor ctx, int cx, int cy) {
+		int lit = (int) (System.currentTimeMillis() / 250 % 3);
+		for (int i = 0; i < 3; i++) {
+			int dx = cx - 6 + i * 5;
+			fill(ctx, dx, cy - 1, dx + 3, cy + 2, i == lit ? pal.accentText() : pal.line2());
+		}
 	}
 
 	private static void drawSearchIcon(GuiGraphicsExtractor ctx, int x, int y, int color) {
