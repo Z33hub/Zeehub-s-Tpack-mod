@@ -45,7 +45,7 @@ public final class ItemStudioClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			// once the game has finished loading: scan packs in the background (so the menu opens at once)
 			// and look for a newer version
-			if (!warmedUp && client.getOverlay() == null) {
+			if (!warmedUp && client.gui.overlay() == null) {
 				warmedUp = true;
 				dev.itemstudio.pack.PackIndexCache.prewarm();
 				UpdateCheck.start();
