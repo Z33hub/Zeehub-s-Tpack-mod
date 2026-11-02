@@ -47,7 +47,14 @@ public enum Category {
 	}
 
 	/** Texture parts shown instead of items (blocks, HUD, particles, effects); empty for item categories. */
+	private List<dev.itemstudio.pack.TexturePart> parts;
+
 	public List<dev.itemstudio.pack.TexturePart> parts() {
+		if (parts == null) parts = makeParts();
+		return parts;
+	}
+
+	private List<dev.itemstudio.pack.TexturePart> makeParts() {
 		return switch (this) {
 			case BLOCKS -> List.of(dev.itemstudio.pack.BlockElement.values());
 			case HUD -> List.of(dev.itemstudio.pack.HudElement.values());

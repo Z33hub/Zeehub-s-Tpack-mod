@@ -31,7 +31,7 @@ public final class PackIndexCache {
 			folderSignature = folder;
 			belowSignature = belowSignature();
 			generation++;
-			current = CompletableFuture.supplyAsync(PackIndex::scan);
+			current = CompletableFuture.supplyAsync(PackIndex::scan, dev.itemstudio.Workers.BACKGROUND);
 			return current;
 		}
 		String below = belowSignature();

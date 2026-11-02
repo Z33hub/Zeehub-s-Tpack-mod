@@ -36,28 +36,30 @@ public final class ProfileSwitcher {
 		rebuild();
 	}
 
-	/** Builds the generated pack from the current choices off the main thread, then turns it on and reloads. */
+	/**
+	 * Builds the generated pack from the current choices in the background (using the pack scan the menu keeps),
+	 * then turns it on and reloads.
+	 */
 	public static void rebuild() {
 		MinecraftClient client = MinecraftClient.getInstance();
 		busy = true;
-		CompletableFuture.supplyAsync(() -> {
-			PackIndex index = PackIndex.scan();
+		StudioConfig choices = StudioConfig.get().copyForBuild();
+		dev.itemstudio.pack.PackIndexCache.get().thenApplyAsync(index -> {
 			try {
-				ItemInfo.clearCache();
-				PackBuilder builder = new PackBuilder(StudioConfig.get(), index).build();
-				if (!PackWriter.write(builder.files())) return -1;
-				return builder.files().isEmpty() ? 0 : 1;
+				PackBuilder builder = new PackBuilder(choices, index).build();
+				PackWriter.Result written = PackWriter.writeChanges(builder.files());
+				return new int[]{written.ordinal(), builder.files().isEmpty() ? 0 : 1};
 			} finally {
 				index.close();
 			}
-		}).whenCompleteAsync((result, error) -> {
+		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((result, error) -> {
 			busy = false;
-			if (error != null || result == null || result < 0) {
+			if (error != null || result == null || result[0] == PackWriter.Result.FAILED.ordinal()) {
 				ItemStudioClient.LOG.warn("Could not switch profile", error);
 				message(Text.literal("Item Studio: could not build the pack - see the game log").formatted(Formatting.RED));
 				return;
 			}
-			PackWriter.enableAndReload(result == 1);
+			PackWriter.enableAndReload(result[1] == 1, result[0] == PackWriter.Result.CHANGED.ordinal());
 		}, client);
 	}
 

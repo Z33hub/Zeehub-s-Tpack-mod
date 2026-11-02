@@ -51,6 +51,10 @@ public enum EffectElement implements TexturePart {
 		return "Effect";
 	}
 
+	String[] patterns() {
+		return patterns;
+	}
+
 	public static EffectElement of(String path) {
 		for (EffectElement e : values()) {
 			if (Glob.texture(path, e.patterns)) return e;

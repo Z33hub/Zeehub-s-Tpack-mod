@@ -144,6 +144,28 @@ public final class StudioConfig {
 		return adjust.computeIfAbsent(itemId, k -> new TreeMap<>()).computeIfAbsent(view.key, k -> new Adjust());
 	}
 
+	/**
+	 * A separate copy of everything the pack builder reads, so a build can run in the background while the menu
+	 * keeps changing the real config.
+	 */
+	public StudioConfig copyForBuild() {
+		StudioConfig c = new StudioConfig();
+		c.styles = new TreeMap<>(styles);
+		c.adjust = copyAdjust(adjust);
+		c.partSize = new TreeMap<>(partSize);
+		c.crosshair = crosshair;
+		c.enabled = enabled;
+		return c;
+	}
+
+	/** How many things the current choices change (same as currentProfile().count(), without copying). */
+	public int currentCount() {
+		java.util.Set<String> keys = new java.util.HashSet<>(styles.keySet());
+		keys.addAll(adjust.keySet());
+		keys.addAll(partSize.keySet());
+		return keys.size() + (crosshair != null ? 1 : 0);
+	}
+
 	/** A copy of the current choices. */
 	public Profile currentProfile() {
 		Profile p = new Profile();

@@ -25,17 +25,19 @@ public final class PackIndex {
 	private final Map<String, PackSource> byId = new LinkedHashMap<>();
 	/** Per pack: item id -> loose item textures named after that item (bow_pulling_0.png -> minecraft:bow). */
 	private final Map<String, Map<String, List<String>>> namedTextures = new HashMap<>();
-	private final Map<String, Provided> providedCache = new HashMap<>();
-	private final Map<String, String> fingerprintCache = new HashMap<>();
-	private final Map<String, Boolean> sameAsVanillaCache = new HashMap<>();
-	private final Map<String, Boolean> sameAsBelowCache = new HashMap<>();
+	private final Map<String, Provided> providedCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<String, String> fingerprintCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<String, Boolean> sameAsVanillaCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<String, Boolean> sameAsBelowCache = new java.util.concurrent.ConcurrentHashMap<>();
 	/** Per pack: texture part (HUD, particle) -> its files in that pack (lower-case paths, .png only). */
 	private final Map<String, Map<TexturePart, List<String>>> partFiles = new HashMap<>();
-	private final Map<String, String> hudFingerprintCache = new HashMap<>();
-	private final Map<String, Boolean> hudSameAsBelowCache = new HashMap<>();
-	private final Map<TexturePart, Boolean> hudBelowIsVanillaCache = new HashMap<>();
-	/** Texture part -> files the game itself has for it (vanilla and turned-on packs). */
-	private final Map<TexturePart, List<String>> gameParts = new HashMap<>();
+	private final Map<String, String> hudFingerprintCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<String, Boolean> hudSameAsBelowCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<TexturePart, Boolean> hudBelowIsVanillaCache = new java.util.concurrent.ConcurrentHashMap<>();
+	/** Texture part -> files the game itself has for it (vanilla and turned-on packs). Replaced as a whole. */
+	private volatile Map<TexturePart, List<String>> gameParts = new HashMap<>();
+	private final Map<TexturePart, List<String>> partAllCache = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<String, List<FilePackSource>> packsForCache = new java.util.concurrent.ConcurrentHashMap<>();
 
 	/** The files a source has for one item. */
 	/**
@@ -86,11 +88,7 @@ public final class PackIndex {
 			parts.values().forEach(java.util.Collections::sort);
 			index.partFiles.put(pack.id(), parts);
 		}
-		for (String path : Resources.listGame("textures")) {
-			String lower = path.toLowerCase();
-			TexturePart part = TexturePart.of(lower);
-			if (part != null) index.gameParts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
-		}
+		index.gameParts = listGameParts();
 		return index;
 	}
 
@@ -174,11 +172,13 @@ public final class PackIndex {
 
 	/** Packs that change this item, in name order. */
 	public List<FilePackSource> packsFor(ItemInfo info) {
-		List<FilePackSource> list = new ArrayList<>();
-		for (FilePackSource pack : packs) {
-			if (provided(pack, info).any()) list.add(pack);
-		}
-		return list;
+		return packsForCache.computeIfAbsent(info.id, k -> {
+			List<FilePackSource> list = new ArrayList<>();
+			for (FilePackSource pack : packs) {
+				if (provided(pack, info).any()) list.add(pack);
+			}
+			return List.copyOf(list);
+		});
 	}
 
 	/**
@@ -289,6 +289,10 @@ public final class PackIndex {
 
 	/** Every file name the game or any scanned pack uses for a part, plus its preview file. */
 	public List<String> partAllFiles(TexturePart element) {
+		return partAllCache.computeIfAbsent(element, this::collectPartFiles);
+	}
+
+	private List<String> collectPartFiles(TexturePart element) {
 		Set<String> all = new java.util.TreeSet<>();
 		all.add(element.preview());
 		List<String> game = gameParts.get(element);
@@ -297,7 +301,7 @@ public final class PackIndex {
 			List<String> files = map.get(element);
 			if (files != null) all.addAll(files);
 		}
-		return new ArrayList<>(all);
+		return List.copyOf(all);
 	}
 
 	/** The files a source has for a HUD part. For vanilla: the game's own versions of every known file. */
@@ -315,11 +319,13 @@ public final class PackIndex {
 	}
 
 	public List<FilePackSource> packsForPart(TexturePart element) {
-		List<FilePackSource> list = new ArrayList<>();
-		for (FilePackSource pack : packs) {
-			if (!partFiles(pack, element).isEmpty()) list.add(pack);
-		}
-		return list;
+		return packsForCache.computeIfAbsent(element.key(), k -> {
+			List<FilePackSource> list = new ArrayList<>();
+			for (FilePackSource pack : packs) {
+				if (!partFiles(pack, element).isEmpty()) list.add(pack);
+			}
+			return List.copyOf(list);
+		});
 	}
 
 	/** Same idea as fingerprint(): packs with identical files for a HUD part look the same. */
@@ -385,11 +391,18 @@ public final class PackIndex {
 		sameAsBelowCache.clear();
 		hudSameAsBelowCache.clear();
 		hudBelowIsVanillaCache.clear();
-		gameParts.clear();
+		gameParts = listGameParts();
+		partAllCache.clear();
+	}
+
+	/** Part files the game has itself, from vanilla and the turned-on packs. */
+	private static Map<TexturePart, List<String>> listGameParts() {
+		Map<TexturePart, List<String>> map = new HashMap<>();
 		for (String path : Resources.listGame("textures")) {
 			String lower = path.toLowerCase();
 			TexturePart part = TexturePart.of(lower);
-			if (part != null) gameParts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
+			if (part != null) map.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
 		}
+		return map;
 	}
 }
