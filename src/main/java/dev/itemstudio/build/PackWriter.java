@@ -92,6 +92,51 @@ public final class PackWriter {
 		return CompletableFuture.completedFuture(null);
 	}
 
+	/** Folder exported packs go to: .minecraft/itemstudio-exports. */
+	public static Path exportFolder() {
+		return net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("itemstudio-exports");
+	}
+
+	/**
+	 * Saves files as a normal resource pack zip that works without Item Studio. Returns the zip, or null if it
+	 * could not be written.
+	 */
+	public static Path exportZip(Map<String, byte[]> files, String name) {
+		String safe = name.replaceAll("[^A-Za-z0-9 _.-]", "").trim();
+		if (safe.isEmpty()) safe = "Pack";
+		String date = java.time.LocalDate.now().toString();
+		Path dir = exportFolder();
+		try {
+			Files.createDirectories(dir);
+			Path zip = dir.resolve("ItemStudio-" + safe + "-" + date + ".zip");
+			for (int i = 2; Files.exists(zip); i++) zip = dir.resolve("ItemStudio-" + safe + "-" + date + "-" + i + ".zip");
+			String mcmeta = PACK_MCMETA.replace("Made by Item Studio. Change it in the Item Studio menu.",
+				safe.replace("\\", "") + " - made with Item Studio");
+			try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(Files.newOutputStream(zip))) {
+				out.putNextEntry(new java.util.zip.ZipEntry("pack.mcmeta"));
+				out.write(mcmeta.getBytes(StandardCharsets.UTF_8));
+				out.closeEntry();
+				try (InputStream icon = PackWriter.class.getResourceAsStream("/assets/itemstudio/icon.png")) {
+					if (icon != null) {
+						out.putNextEntry(new java.util.zip.ZipEntry("pack.png"));
+						out.write(icon.readAllBytes());
+						out.closeEntry();
+					}
+				}
+				for (Map.Entry<String, byte[]> entry : new java.util.TreeMap<>(files).entrySet()) {
+					if (entry.getKey().contains("..")) continue;
+					out.putNextEntry(new java.util.zip.ZipEntry(entry.getKey()));
+					out.write(entry.getValue());
+					out.closeEntry();
+				}
+			}
+			return zip;
+		} catch (IOException e) {
+			ItemStudioClient.LOG.error("Could not export the pack", e);
+			return null;
+		}
+	}
+
 	private static void deleteTree(Path dir) throws IOException {
 		if (!Files.exists(dir)) return;
 		try (Stream<Path> walk = Files.walk(dir)) {

@@ -44,6 +44,7 @@ import java.util.Set;
 public final class PackBuilder {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 	private static final String NS = ItemStudioClient.MOD_ID;
+	public static final String CROSSHAIR_FILE = "assets/minecraft/textures/gui/sprites/hud/crosshair.png";
 
 	private final StudioConfig config;
 	private final PackIndex index;
@@ -83,6 +84,13 @@ public final class PackBuilder {
 				problems.add(itemId + ": " + e.getMessage());
 				ItemStudioClient.LOG.warn("Could not build {}", itemId, e);
 			}
+		}
+		if (config.crosshair != null && config.crosshair.length() == 225) {
+			// a hand-drawn crosshair replaces whatever crosshair style is picked
+			int[] px = new int[225];
+			for (int i = 0; i < 225; i++) px[i] = config.crosshair.charAt(i) == '1' ? 0xFFFFFFFF : 0;
+			out.put(CROSSHAIR_FILE, dev.itemstudio.pack.Png.encode(15, 15, px));
+			out.remove(CROSSHAIR_FILE + ".mcmeta");
 		}
 		return this;
 	}

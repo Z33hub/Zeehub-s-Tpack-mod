@@ -371,7 +371,25 @@ public final class PackIndex {
 		});
 	}
 
+	/** Closes open pack files. Everything found stays, so the index can be used again later. */
 	public void close() {
 		packs.forEach(FilePackSource::close);
+	}
+
+	/**
+	 * The turned-on packs changed: forget everything that compared against them and list the game's own part
+	 * files again. What each pack contains is kept.
+	 */
+	public synchronized void refreshBelow() {
+		sameAsVanillaCache.clear();
+		sameAsBelowCache.clear();
+		hudSameAsBelowCache.clear();
+		hudBelowIsVanillaCache.clear();
+		gameParts.clear();
+		for (String path : Resources.listGame("textures")) {
+			String lower = path.toLowerCase();
+			TexturePart part = TexturePart.of(lower);
+			if (part != null) gameParts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
+		}
 	}
 }
