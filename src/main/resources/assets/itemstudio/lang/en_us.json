@@ -1,6 +1,7 @@
 {
 	"key.itemstudio.open": "Open Item Studio",
 	"key.itemstudio.toggle": "Turn Item Studio on/off",
+	"key.itemstudio.next_profile": "Next Item Studio profile",
 	"key.category.itemstudio.main": "Item Studio",
 	"key.category.itemstudio": "Item Studio",
 	"itemstudio.title": "Item Studio"

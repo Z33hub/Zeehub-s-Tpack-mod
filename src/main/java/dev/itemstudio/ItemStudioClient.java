@@ -1,6 +1,7 @@
 package dev.itemstudio;
 
 import dev.itemstudio.build.PackWriter;
+import dev.itemstudio.build.ProfileSwitcher;
 import dev.itemstudio.ui.StudioScreen;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -25,6 +26,7 @@ public final class ItemStudioClient implements ClientModInitializer {
 	private static final KeyBinding.Category CATEGORY = KeyBinding.Category.create(Identifier.of(MOD_ID, "main"));
 	private static KeyBinding openKey;
 	private static KeyBinding toggleKey;
+	private static KeyBinding nextProfileKey;
 
 	@Override
 	public void onInitializeClient() {
@@ -35,6 +37,8 @@ public final class ItemStudioClient implements ClientModInitializer {
 		// No key by default, so it can't clash with anything. Set it in Mod Menu or Options > Controls.
 		toggleKey = KeyBindingHelper.registerKeyBinding(
 			new KeyBinding("key.itemstudio.toggle", GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
+		nextProfileKey = KeyBindingHelper.registerKeyBinding(
+			new KeyBinding("key.itemstudio.next_profile", GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			while (openKey.wasPressed()) {
@@ -47,6 +51,11 @@ public final class ItemStudioClient implements ClientModInitializer {
 				toggle = true; // one toggle per tick, however many presses piled up
 			}
 			if (toggle) setEnabled(!StudioConfig.get().enabled);
+			boolean nextProfile = false;
+			while (nextProfileKey.wasPressed()) {
+				nextProfile = true;
+			}
+			if (nextProfile) ProfileSwitcher.next();
 		});
 
 		// Small button in the top-left corner of the pause menu.
@@ -66,6 +75,10 @@ public final class ItemStudioClient implements ClientModInitializer {
 
 	public static KeyBinding toggleKey() {
 		return toggleKey;
+	}
+
+	public static KeyBinding nextProfileKey() {
+		return nextProfileKey;
 	}
 
 	/**

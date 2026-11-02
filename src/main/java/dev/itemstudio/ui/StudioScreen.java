@@ -133,6 +133,12 @@ public final class StudioScreen extends Screen {
 	private Slider dragging;
 	private TextFieldWidget search;
 	private TextFieldWidget styleSearch;
+	/** Name box shown while renaming a profile. */
+	private TextFieldWidget profileName;
+	private boolean profilesOpen;
+	private boolean renamingProfile;
+	private int profileChipX;
+	private long deleteArmedUntil;
 	private Theme.Palette pal;
 
 	// layout
@@ -187,6 +193,14 @@ public final class StudioScreen extends Screen {
 			scroll.put("cards", 0);
 		});
 		addDrawableChild(styleSearch);
+
+		String typed = profileName == null ? null : profileName.getText();
+		profileName = new TextFieldWidget(textRenderer, 0, 0, 100, 10, Text.literal("Profile name"));
+		profileName.setDrawsBackground(false);
+		profileName.setMaxLength(24);
+		if (typed != null) profileName.setText(typed);
+		profileName.visible = false;
+		addDrawableChild(profileName);
 	}
 
 	@Override
@@ -196,6 +210,7 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public void close() {
+		if (renamingProfile) commitRename();
 		if (pending > 0) apply();
 		client.setScreen(parent);
 	}
@@ -715,8 +730,10 @@ public final class StudioScreen extends Screen {
 		if (settingsOpen) drawSettings(ctx, mouseX, mouseY);
 		else drawSide(ctx, mouseX, mouseY);
 		drawFooter(ctx, mouseX, mouseY);
+		if (profilesOpen) drawProfiles(ctx, mouseX, mouseY);
+		profileName.visible = profilesOpen && renamingProfile;
 
-		super.render(ctx, mouseX, mouseY, delta); // the two search boxes
+		super.render(ctx, mouseX, mouseY, delta); // the search boxes (and the profile name box)
 
 		for (int i = hits.size() - 1; i >= 0; i--) {
 			Hit hit = hits.get(i);
@@ -733,7 +750,25 @@ public final class StudioScreen extends Screen {
 		ctx.drawItem(stack(Items.DIAMOND_SWORD), x + 1, y);
 		bold(ctx, "Item Studio", x + 24, py + 8, TEXT);
 
-		int crumbX = x + 30 + boldW("Item Studio");
+		// profile switcher
+		int chipX = x + 30 + boldW("Item Studio");
+		String profile = trim(config.activeProfile, 90);
+		int chipW = textW(profile) + 22;
+		boolean chipHover = inside(mouseX, mouseY, chipX, py + 4, chipX + chipW, py + 20);
+		roundRect(ctx, chipX, py + 4, chipX + chipW, py + 20, profilesOpen ? pal.soft() : chipHover ? pal.surfaceHover() : pal.surface());
+		outline(ctx, chipX, py + 4, chipX + chipW, py + 20, profilesOpen ? pal.accent() : pal.surfaceBorder());
+		text(ctx, profile, chipX + 7, py + 8, TEXT);
+		int caret = chipX + chipW - 11;
+		fill(ctx, caret, py + 11, caret + 5, py + 12, MUTED);
+		fill(ctx, caret + 1, py + 12, caret + 4, py + 13, MUTED);
+		fill(ctx, caret + 2, py + 13, caret + 3, py + 14, MUTED);
+		profileChipX = chipX;
+		hits.add(new Hit(chipX, py + 4, chipX + chipW, py + 20, () -> {
+			if (renamingProfile) commitRename();
+			profilesOpen = !profilesOpen;
+		}, null, profilesOpen ? null : "Profiles: save and switch whole setups", null));
+
+		int crumbX = chipX + chipW + 8;
 		fill(ctx, crumbX, py + 7, crumbX + 1, py + 17, pal.line2());
 		String where = !query.isEmpty() ? "Search" : category.label;
 		Target shownTarget = current();
@@ -1559,6 +1594,177 @@ public final class StudioScreen extends Screen {
 		scrollAreas.add(new ScrollArea("settings", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
+	// ------------------------------------------------------------------ profiles
+
+	private void drawProfiles(DrawContext ctx, int mouseX, int mouseY) {
+		// a click anywhere outside the list closes it
+		hits.add(new Hit(0, 0, width, height, this::closeProfiles, this::closeProfiles, null, null));
+		List<String> names = new ArrayList<>(config.profiles.keySet());
+		int w = 196, rowH = 14;
+		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 2;
+		int hintH = 2 * smallH() + 2;
+		int h = 22 + names.size() * rowH + 8 + 3 * 18 + hintH + 6;
+		fill(ctx, x + 3, y + 3, x + w + 3, y + h + 3, 0x66000000);
+		roundRect(ctx, x, y, x + w, y + h, Theme.argb(theme().base, 0.97f));
+		outline(ctx, x, y, x + w, y + h, pal.accent());
+		hits.add(new Hit(x, y, x + w, y + h, () -> { }, () -> { }, null, null)); // clicks on empty parts do nothing
+		bold(ctx, "Profiles", x + 8, y + 7, TEXT);
+		String count = names.size() + " saved";
+		small(ctx, count, x + w - 8 - smallW(count), y + 7, MUTED);
+		int ry = y + 21;
+		for (String name : names) {
+			boolean active = name.equals(config.activeProfile);
+			boolean hover = inside(mouseX, mouseY, x + 4, ry, x + w - 4, ry + rowH);
+			if (active) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.soft());
+			else if (hover) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.surfaceHover());
+			if (active) drawCheck(ctx, x + 8, ry + 4, pal.accentText());
+			StudioConfig.Profile saved = config.profiles.get(name);
+			int n = active ? config.currentProfile().count() : saved == null ? 0 : saved.count();
+			String changes = n == 0 ? "empty" : n + " changed";
+			int cw = smallW(changes);
+			if (active && renamingProfile) {
+				profileName.setX(x + 21);
+				profileName.setY(ry + 3);
+				profileName.setWidth(w - 30);
+				outline(ctx, x + 18, ry + 1, x + w - 6, ry + rowH - 1, pal.accent());
+			} else {
+				text(ctx, trim(name, w - 34 - cw), x + 21, ry + 3, active ? 0xFFFFFFFF : TEXT2);
+				small(ctx, changes, x + w - 9 - cw, ry + 3, MUTED);
+			}
+			final String target = name;
+			if (!active) {
+				hits.add(new Hit(x + 4, ry, x + w - 4, ry + rowH, () -> switchProfile(target), null,
+					"Switch to " + name + " (applies right away)", null));
+			}
+			ry += rowH;
+		}
+		fill(ctx, x + 6, ry + 3, x + w - 6, ry + 4, pal.line2());
+		ry += 8;
+		int bw = (w - 20) / 2;
+		int b2 = x + 8 + bw + 4;
+		button(ctx, x + 8, ry, bw, 15, "New", false, false, mouseX, mouseY, () -> newProfile(false), "Start an empty profile");
+		button(ctx, b2, ry, bw, 15, "Duplicate", false, false, mouseX, mouseY, () -> newProfile(true), "Copy this profile");
+		ry += 18;
+		button(ctx, x + 8, ry, bw, 15, "Rename", false, false, mouseX, mouseY, this::startRename, "Rename this profile");
+		boolean armed = System.currentTimeMillis() < deleteArmedUntil;
+		button(ctx, b2, ry, bw, 15, armed ? "Sure?" : "Delete", armed, false, mouseX, mouseY, this::deleteProfile,
+			names.size() > 1 ? "Delete this profile" : "You need at least one profile");
+		ry += 18;
+		button(ctx, x + 8, ry, bw, 15, "Copy code", false, false, mouseX, mouseY, this::copyProfileCode,
+			"Copy a code for this profile to send to a friend");
+		button(ctx, b2, ry, bw, 15, "Paste code", false, false, mouseX, mouseY, this::pasteProfileCode,
+			"Add a profile from a code you copied");
+		ry += 20;
+		smallWrapped(ctx, "Switch in game with the Next profile key (set it in Keybinds).", x + 8, ry, w - 16, MUTED);
+	}
+
+	private void closeProfiles() {
+		if (renamingProfile) commitRename();
+		profilesOpen = false;
+	}
+
+	/** Saves the current choices into the profile being left, loads the other one and applies it. */
+	private void switchProfile(String name) {
+		if (!config.profiles.containsKey(name) || name.equals(config.activeProfile)) return;
+		if (renamingProfile) commitRename();
+		config.storeActive();
+		config.loadProfile(name);
+		config.save();
+		history.clear();
+		pushHistory();
+		apply();
+		if (statusColor == GOOD) setStatus("Switched to " + name, GOOD);
+	}
+
+	private void newProfile(boolean copy) {
+		if (renamingProfile) commitRename();
+		config.storeActive();
+		String name = config.uniqueProfileName(copy ? config.activeProfile + " copy" : "Profile " + (config.profiles.size() + 1));
+		if (name.length() > 24) name = config.uniqueProfileName("Profile");
+		if (copy) {
+			// same choices, so nothing needs rebuilding
+			config.profiles.put(name, config.currentProfile());
+			config.activeProfile = name;
+			config.save();
+			setStatus("Made " + name, GOOD);
+		} else {
+			config.profiles.put(name, new StudioConfig.Profile());
+			switchProfile(name);
+		}
+		startRename();
+	}
+
+	private void startRename() {
+		renamingProfile = true;
+		profileName.setText(config.activeProfile);
+		setFocused(profileName);
+		profileName.setFocused(true);
+	}
+
+	private void commitRename() {
+		renamingProfile = false;
+		profileName.setFocused(false);
+		String name = profileName.getText().trim();
+		if (name.isEmpty() || name.equals(config.activeProfile)) return;
+		if (config.profiles.containsKey(name)) {
+			setStatus("There's already a profile called " + name, WARN);
+			return;
+		}
+		config.renameProfile(config.activeProfile, name);
+		config.save();
+	}
+
+	private void deleteProfile() {
+		if (renamingProfile) commitRename();
+		if (config.profiles.size() <= 1) {
+			setStatus("Keep at least one profile", WARN);
+			return;
+		}
+		long now = System.currentTimeMillis();
+		if (now > deleteArmedUntil) {
+			deleteArmedUntil = now + 3000;
+			setStatus("Click Delete again to remove " + config.activeProfile, WARN);
+			return;
+		}
+		deleteArmedUntil = 0;
+		String gone = config.activeProfile;
+		config.profiles.remove(gone);
+		String next = config.profiles.keySet().iterator().next();
+		config.loadProfile(next);
+		config.save();
+		history.clear();
+		pushHistory();
+		apply();
+		setStatus("Deleted " + gone + ", now using " + next, GOOD);
+	}
+
+	private void copyProfileCode() {
+		String code = dev.itemstudio.ProfileCodes.encode(config.activeProfile, config.currentProfile());
+		client.keyboard.setClipboard(code);
+		setStatus("Code for " + config.activeProfile + " copied - paste it to a friend", GOOD);
+	}
+
+	private void pasteProfileCode() {
+		dev.itemstudio.ProfileCodes.Decoded decoded = dev.itemstudio.ProfileCodes.decode(client.keyboard.getClipboard());
+		if (decoded == null) {
+			setStatus("No profile code on your clipboard", WARN);
+			return;
+		}
+		List<String> missing = new ArrayList<>();
+		if (index != null) {
+			for (String pack : new java.util.TreeSet<>(decoded.profile().styles.values())) {
+				if (!VanillaSource.ID.equals(pack) && index.get(pack) == null) missing.add(pack);
+			}
+		}
+		config.storeActive();
+		String name = config.uniqueProfileName(decoded.name());
+		config.profiles.put(name, decoded.profile());
+		switchProfile(name);
+		if (missing.isEmpty()) setStatus("Added " + name + " from the code", GOOD);
+		else setStatus("Added " + name + " - " + missing.size() + " pack" + (missing.size() == 1 ? "" : "s")
+			+ " not in your folder: " + String.join(", ", missing), WARN);
+	}
+
 	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
 		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, pal.line());
 		int y = footerY + 5;
@@ -1818,9 +2024,11 @@ public final class StudioScreen extends Screen {
 	@Override
 	public boolean mouseClicked(Click click, boolean doubled) {
 		double x = click.x(), y = click.y();
-		if (search.isMouseOver(x, y) || (styleSearch.visible && styleSearch.isMouseOver(x, y))) {
+		if (search.isMouseOver(x, y) || (styleSearch.visible && styleSearch.isMouseOver(x, y))
+			|| (profileName.visible && profileName.isMouseOver(x, y))) {
 			return super.mouseClicked(click, doubled);
 		}
+		if (renamingProfile) commitRename();
 		setFocused(null);
 		search.setFocused(false);
 		styleSearch.setFocused(false);
@@ -1886,6 +2094,22 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(KeyInput input) {
+		if (renamingProfile && profileName.isFocused()) {
+			if (input.getKeycode() == org.lwjgl.glfw.GLFW.GLFW_KEY_ENTER || input.getKeycode() == org.lwjgl.glfw.GLFW.GLFW_KEY_KP_ENTER) {
+				commitRename();
+				return true;
+			}
+			if (input.isEscape()) {
+				renamingProfile = false;
+				profileName.setFocused(false);
+				return true;
+			}
+			return super.keyPressed(input);
+		}
+		if (profilesOpen && input.isEscape()) {
+			profilesOpen = false;
+			return true;
+		}
 		boolean typing = search.isFocused() || styleSearch.isFocused();
 		if (input.hasCtrlOrCmd() && input.getKeycode() == org.lwjgl.glfw.GLFW.GLFW_KEY_Z && !typing) {
 			undo();

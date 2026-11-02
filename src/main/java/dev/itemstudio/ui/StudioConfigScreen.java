@@ -29,6 +29,7 @@ public final class StudioConfigScreen extends Screen {
 	private ButtonWidget onOffButton;
 	private ButtonWidget openKeyButton;
 	private ButtonWidget toggleKeyButton;
+	private ButtonWidget nextProfileButton;
 	private int top;
 
 	public StudioConfigScreen(Screen parent) {
@@ -40,7 +41,7 @@ public final class StudioConfigScreen extends Screen {
 	protected void init() {
 		int w = 240;
 		int x = width / 2 - w / 2;
-		top = Math.max(34, height / 2 - 84);
+		top = Math.max(34, height / 2 - 96);
 		int y = top;
 
 		onOffButton = addDrawableChild(ButtonWidget.builder(onOffText(), b -> {
@@ -56,6 +57,10 @@ public final class StudioConfigScreen extends Screen {
 			.build());
 		y += 24;
 		toggleKeyButton = addDrawableChild(ButtonWidget.builder(Text.empty(), b -> listen(ItemStudioClient.toggleKey()))
+			.dimensions(x, y, w, 20)
+			.build());
+		y += 24;
+		nextProfileButton = addDrawableChild(ButtonWidget.builder(Text.empty(), b -> listen(ItemStudioClient.nextProfileKey()))
 			.dimensions(x, y, w, 20)
 			.build());
 
@@ -99,6 +104,7 @@ public final class StudioConfigScreen extends Screen {
 	private void refreshKeys() {
 		keyButton(openKeyButton, ItemStudioClient.openKey(), "Open menu");
 		keyButton(toggleKeyButton, ItemStudioClient.toggleKey(), "Turn on/off");
+		keyButton(nextProfileButton, ItemStudioClient.nextProfileKey(), "Next profile");
 	}
 
 	private void keyButton(ButtonWidget button, KeyBinding key, String label) {
@@ -151,7 +157,7 @@ public final class StudioConfigScreen extends Screen {
 		center(ctx, title, top - 20, WHITE);
 		center(ctx, Text.literal("Off puts your normal packs back. Your picks stay saved."), top + 25, GRAY);
 		ctx.drawText(textRenderer, Text.literal("Keys"), width / 2 - 120, top + 34, WHITE, true);
-		center(ctx, Text.literal("Click a key, then press a key or mouse button. Esc = no key."), top + 97, GRAY);
+		center(ctx, Text.literal("Click a key, then press a key or mouse button. Esc = no key."), top + 121, GRAY);
 	}
 
 	private void center(DrawContext ctx, Text text, int y, int color) {
