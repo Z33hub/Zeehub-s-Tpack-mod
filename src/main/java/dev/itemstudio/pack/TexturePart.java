@@ -19,9 +19,21 @@ public interface TexturePart {
 	/** What the category shows under the name, like "HUD" or "Particle". */
 	String kind();
 
+	/** An item that shows this part in 3D (a block's item), or null to show the preview texture flat. */
+	default String itemId() {
+		return null;
+	}
+
+	/** True for particles, which can be made bigger or smaller. */
+	default boolean resizable() {
+		return this instanceof ParticleElement;
+	}
+
 	static List<TexturePart> all() {
 		List<TexturePart> list = new ArrayList<>(List.of(HudElement.values()));
 		list.addAll(List.of(ParticleElement.values()));
+		list.addAll(List.of(BlockElement.values()));
+		list.addAll(List.of(EffectElement.values()));
 		return list;
 	}
 
@@ -36,6 +48,9 @@ public interface TexturePart {
 	/** Which part a pack file belongs to, or null. path is lower case. */
 	static TexturePart of(String path) {
 		TexturePart part = HudElement.of(path);
-		return part != null ? part : ParticleElement.of(path);
+		if (part == null) part = ParticleElement.of(path);
+		if (part == null) part = EffectElement.of(path);
+		if (part == null) part = BlockElement.of(path);
+		return part;
 	}
 }

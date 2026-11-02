@@ -34,6 +34,8 @@ public final class PackIndex {
 	private final Map<String, String> hudFingerprintCache = new HashMap<>();
 	private final Map<String, Boolean> hudSameAsBelowCache = new HashMap<>();
 	private final Map<TexturePart, Boolean> hudBelowIsVanillaCache = new HashMap<>();
+	/** Texture part -> files the game itself has for it (vanilla and turned-on packs). */
+	private final Map<TexturePart, List<String>> gameParts = new HashMap<>();
 
 	/** The files a source has for one item. */
 	/**
@@ -83,6 +85,11 @@ public final class PackIndex {
 			}
 			parts.values().forEach(java.util.Collections::sort);
 			index.partFiles.put(pack.id(), parts);
+		}
+		for (String path : Resources.listGame("textures")) {
+			String lower = path.toLowerCase();
+			TexturePart part = TexturePart.of(lower);
+			if (part != null) index.gameParts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
 		}
 		return index;
 	}
@@ -280,10 +287,12 @@ public final class PackIndex {
 
 	// ---------------------------------------------------------------- texture parts (HUD, particles)
 
-	/** Every file name any scanned pack uses for a HUD part, plus its preview file. */
+	/** Every file name the game or any scanned pack uses for a part, plus its preview file. */
 	public List<String> partAllFiles(TexturePart element) {
 		Set<String> all = new java.util.TreeSet<>();
 		all.add(element.preview());
+		List<String> game = gameParts.get(element);
+		if (game != null) all.addAll(game);
 		for (Map<TexturePart, List<String>> map : partFiles.values()) {
 			List<String> files = map.get(element);
 			if (files != null) all.addAll(files);

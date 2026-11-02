@@ -29,8 +29,10 @@ public enum Category {
 		"water_bucket", "fishing_rod", "rail", "detector_rail", "activator_rail", "powered_rail").contains(p)),
 	TOOLS("Other tools", Items.DIAMOND_SHOVEL, p -> p.endsWith("_shovel") || p.endsWith("_hoe")
 		|| Set.of("shears", "brush", "spyglass", "clock", "compass", "recovery_compass").contains(p)),
+	BLOCKS("Blocks", Items.GRASS_BLOCK, p -> false),
 	HUD("HUD", Items.PAPER, p -> false),
 	PARTICLES("Particles", Items.BLAZE_POWDER, p -> false),
+	EFFECTS("Glint & effects", Items.EXPERIENCE_BOTTLE, p -> false),
 	ALL("All items", Items.CHEST, p -> true);
 
 	public final String label;
@@ -44,11 +46,13 @@ public enum Category {
 		this.match = match;
 	}
 
-	/** Texture parts shown instead of items (HUD, particles); empty for item categories. */
+	/** Texture parts shown instead of items (blocks, HUD, particles, effects); empty for item categories. */
 	public List<dev.itemstudio.pack.TexturePart> parts() {
 		return switch (this) {
+			case BLOCKS -> List.of(dev.itemstudio.pack.BlockElement.values());
 			case HUD -> List.of(dev.itemstudio.pack.HudElement.values());
 			case PARTICLES -> List.of(dev.itemstudio.pack.ParticleElement.values());
+			case EFFECTS -> List.of(dev.itemstudio.pack.EffectElement.values());
 			default -> List.of();
 		};
 	}

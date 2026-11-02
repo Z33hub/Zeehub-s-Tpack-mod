@@ -33,8 +33,14 @@ public final class StudioConfig {
 	// Look of the menu
 	public String theme = "PURPLE";
 	public float opacity = 0.78f;
-	/** Off = Minecraft's own font (default). On = the Poppins font that comes with the mod. */
+	/** Old setting (before 1.5): on = Poppins. Still read so existing configs keep their font. */
 	public boolean customFont = false;
+	/** Menu font id (see ui.MenuFont). Null = decided by customFont. */
+	public String font = null;
+	/** Style card size: 0 small, 1 medium, 2 large. */
+	public int cardSize = 1;
+	/** Particle size per part key ("particle:crit"): 1 = normal size. */
+	public Map<String, Float> partSize = new TreeMap<>();
 
 	// Style browsing
 	public java.util.Set<String> favorites = new java.util.TreeSet<>();
@@ -61,6 +67,8 @@ public final class StudioConfig {
 				if (config != null) {
 					if (config.styles == null) config.styles = new TreeMap<>();
 					if (config.adjust == null) config.adjust = new TreeMap<>();
+					if (config.partSize == null) config.partSize = new TreeMap<>();
+					config.partSize = new TreeMap<>(config.partSize);
 					config.styles = new TreeMap<>(config.styles);
 					config.adjust = new TreeMap<>(config.adjust);
 					return config;
@@ -103,8 +111,28 @@ public final class StudioConfig {
 		return adjust.computeIfAbsent(itemId, k -> new TreeMap<>()).computeIfAbsent(view.key, k -> new Adjust());
 	}
 
+	public String fontId() {
+		return font != null ? font : customFont ? "poppins" : "minecraft";
+	}
+
+	public void setFont(String id) {
+		font = id;
+		customFont = !"minecraft".equals(id);
+	}
+
+	public float partSizeOf(String key) {
+		Float size = partSize.get(key);
+		return size == null ? 1f : size;
+	}
+
+	public void setPartSize(String key, float size) {
+		if (Math.abs(size - 1f) < 1e-3f) partSize.remove(key);
+		else partSize.put(key, size);
+	}
+
 	/** Drops empty entries so the file stays tidy and unchanged items are not rebuilt. */
 	public void cleanUp() {
+		partSize.values().removeIf(v -> v == null || Math.abs(v - 1f) < 1e-3f);
 		adjust.values().forEach(views -> views.values().removeIf(Adjust::isDefault));
 		adjust.values().removeIf(Map::isEmpty);
 	}

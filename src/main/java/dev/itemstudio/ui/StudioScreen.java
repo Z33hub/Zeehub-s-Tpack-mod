@@ -58,8 +58,6 @@ public final class StudioScreen extends Screen {
 	private static final int GOOD = 0xFF5BE49B;
 	private static final int GOLD = 0xFFF5B83D;
 
-	private static final StyleSpriteSource.Font POPPINS = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins"));
-	private static final StyleSpriteSource.Font POPPINS_BOLD = new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, "poppins_semibold"));
 
 	private static final int HEADER = 24;
 	private static final int FOOTER = 26;
@@ -102,6 +100,17 @@ public final class StudioScreen extends Screen {
 	private final List<ScrollArea> scrollAreas = new ArrayList<>();
 	private final Map<String, Integer> scroll = new HashMap<>();
 	private static final com.google.gson.Gson SNAPSHOT_GSON = new com.google.gson.Gson();
+	private static final java.lang.reflect.Type ADJUST_TYPE =
+		new com.google.gson.reflect.TypeToken<java.util.TreeMap<String, java.util.TreeMap<String, Adjust>>>() {}.getType();
+
+	/** Everything the user picks, for undo. */
+	private record State(Map<String, String> styles, String adjust, Map<String, Float> partSize) {
+	}
+
+	private final java.util.ArrayDeque<State> history = new java.util.ArrayDeque<>();
+	/** Smooth movement of the highlighted category in the sidebar. */
+	private float railHighlight = Float.NaN;
+	private long lastFrame = System.nanoTime();
 
 	private PackIndex index;
 	private CompletableFuture<PackIndex> loading;
@@ -140,6 +149,7 @@ public final class StudioScreen extends Screen {
 	protected void init() {
 		if (index == null && loading == null) startScan("Loading packs...");
 		if (applied == null) applied = snapshot();
+		if (history.isEmpty()) pushHistory();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 
 		px = 6;
@@ -205,11 +215,27 @@ public final class StudioScreen extends Screen {
 
 	// ------------------------------------------------------------------ text with the menu font
 
-	private MutableText styled(String s, boolean bold) {
-		if (!config.customFont) {
+	private final Map<String, StyleSpriteSource.Font> fontCache = new HashMap<>();
+
+	private MenuFont menuFont() {
+		return MenuFont.byId(config.fontId());
+	}
+
+	private StyleSpriteSource.Font fontOf(MenuFont f, boolean bold) {
+		String path = f.id + (bold ? "_semibold" : "");
+		return fontCache.computeIfAbsent(path, p -> new StyleSpriteSource.Font(Identifier.of(ItemStudioClient.MOD_ID, p)));
+	}
+
+	/** Text in a given menu font; Minecraft's font uses the game's own bold. */
+	private MutableText styledIn(String s, MenuFont f, boolean bold) {
+		if (f.pixel()) {
 			return bold ? Text.literal(s).setStyle(Style.EMPTY.withBold(true)) : Text.literal(s);
 		}
-		return Text.literal(s).setStyle(Style.EMPTY.withFont(bold ? POPPINS_BOLD : POPPINS));
+		return Text.literal(s).setStyle(Style.EMPTY.withFont(fontOf(f, bold)));
+	}
+
+	private MutableText styled(String s, boolean bold) {
+		return styledIn(s, menuFont(), bold);
 	}
 
 	private int textW(String s) {
@@ -238,7 +264,7 @@ public final class StudioScreen extends Screen {
 
 	/** True when the menu uses Minecraft's pixel font (the default). Pixel text is never shrunk: it turns blotchy. */
 	private boolean pixelFont() {
-		return !config.customFont;
+		return menuFont().pixel();
 	}
 
 	/** Hints and sub-labels: 75% with the custom font, full size with Minecraft's font. */
@@ -341,10 +367,39 @@ public final class StudioScreen extends Screen {
 		Map<String, String> map = new HashMap<>();
 		java.util.Set<String> ids = new java.util.HashSet<>(config.styles.keySet());
 		ids.addAll(config.adjust.keySet());
+		ids.addAll(config.partSize.keySet());
 		for (String id : ids) {
-			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)));
+			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)) + "|" + config.partSize.get(id));
 		}
 		return map;
+	}
+
+	private State captureState() {
+		return new State(new java.util.TreeMap<>(config.styles), SNAPSHOT_GSON.toJson(config.adjust),
+			new java.util.TreeMap<>(config.partSize));
+	}
+
+	private void pushHistory() {
+		State now = captureState();
+		if (!history.isEmpty() && history.peekLast().equals(now)) return;
+		history.addLast(now);
+		while (history.size() > 60) history.removeFirst();
+	}
+
+	/** Goes back to the choices before the last change (Ctrl+Z). */
+	private void undo() {
+		if (history.size() < 2) {
+			setStatus("Nothing to undo", MUTED);
+			return;
+		}
+		history.removeLast();
+		State back = history.peekLast();
+		config.styles = new java.util.TreeMap<>(back.styles());
+		java.util.Map<String, java.util.Map<String, Adjust>> adjust = SNAPSHOT_GSON.fromJson(back.adjust(), ADJUST_TYPE);
+		config.adjust = adjust == null ? new java.util.TreeMap<>() : new java.util.TreeMap<>(adjust);
+		config.partSize = new java.util.TreeMap<>(back.partSize());
+		changed(false);
+		setStatus("Undone" + (pending > 0 ? " - " + pending + " item" + (pending == 1 ? "" : "s") + " changed" : ""), pending > 0 ? WARN : MUTED);
 	}
 
 	/** Items whose choices differ from the last apply. Picking A, then B, then C for one item is 1. */
@@ -362,6 +417,7 @@ public final class StudioScreen extends Screen {
 	private void changed(boolean finished) {
 		config.cleanUp();
 		config.save();
+		if (finished) pushHistory();
 		pending = countPending();
 		if (pending == 0) {
 			setStatus("Nothing waiting - matches what's applied", MUTED);
@@ -414,6 +470,18 @@ public final class StudioScreen extends Screen {
 
 	private Target partTarget(TexturePart element) {
 		return new Target(element.key(), null, element);
+	}
+
+	private final Map<TexturePart, Item> partItems = new HashMap<>();
+
+	/** The item that shows a part in 3D (a block's item), or null. */
+	private Item partItem(TexturePart part) {
+		Item item = partItems.computeIfAbsent(part, p -> {
+			Identifier id = p.itemId() == null ? null : Identifier.tryParse(p.itemId());
+			if (id == null || !Registries.ITEM.containsId(id)) return Items.AIR;
+			return Registries.ITEM.get(id);
+		});
+		return item == Items.AIR ? null : item;
 	}
 
 	private boolean partMode() {
@@ -511,7 +579,11 @@ public final class StudioScreen extends Screen {
 		java.util.function.Function<String, byte[]> read = vanilla ? Resources::readVanilla : Resources::readBelow;
 		String main = mainFile(t);
 		byte[] flat = main == null ? null : read.apply(main);
-		return t.isPart() ? flat : itemPicture(ItemInfo.of(t.item), read, flat);
+		if (t.isPart()) {
+			Item block = partItem(t.part);
+			return block == null ? flat : itemPicture(ItemInfo.of(block), read, flat);
+		}
+		return itemPicture(ItemInfo.of(t.item), read, flat);
 	}
 
 	/** Bytes of the picture for a pack's version of a target. */
@@ -520,13 +592,18 @@ public final class StudioScreen extends Screen {
 			ItemInfo info = ItemInfo.of(t.item);
 			return itemPicture(info, path -> readWithBelow(p, path), previewBytes(p, info));
 		}
+		byte[] flat;
 		try {
-			if (p.has(t.part.preview())) return p.read(t.part.preview());
-			List<String> files = index.partFiles(p, t.part);
-			return files.isEmpty() ? null : p.read(files.get(0));
+			if (p.has(t.part.preview())) flat = p.read(t.part.preview());
+			else {
+				List<String> files = index.partFiles(p, t.part);
+				flat = files.isEmpty() ? null : p.read(files.get(0));
+			}
 		} catch (Exception e) {
-			return null;
+			flat = null;
 		}
+		Item block = partItem(t.part);
+		return block == null ? flat : itemPicture(ItemInfo.of(block), path -> readWithBelow(p, path), flat);
 	}
 
 	private String mainFile(Target t) {
@@ -560,6 +637,9 @@ public final class StudioScreen extends Screen {
 
 	/** Draws an item icon, or a HUD part's picture, in a size x size box. */
 	private void drawTargetIcon(DrawContext ctx, Target t, int x, int y, int size) {
+		if (t.isPart() && partItem(t.part) != null) {
+			t = itemTarget(partItem(t.part));
+		}
 		if (t.isPart()) {
 			String file = t.part.preview();
 			if (drawPreview(ctx, "below|" + file, () -> Resources.readBelow(file), x, y, size)) return;
@@ -698,12 +778,23 @@ public final class StudioScreen extends Screen {
 
 		ctx.enableScissor(x1, top, x2, y2);
 		int y = top - off;
+		// the highlight slides to the chosen category instead of jumping
+		long now = System.nanoTime();
+		float dt = Math.min(0.1f, (now - lastFrame) / 1e9f);
+		lastFrame = now;
+		if (query.isEmpty()) {
+			int target = top - off + category.ordinal() * (rowH + 1);
+			if (Float.isNaN(railHighlight) || Math.abs(target - railHighlight) > 400) railHighlight = target;
+			else railHighlight += (target - railHighlight) * Math.min(1f, dt * 18f);
+			int hy = Math.round(railHighlight);
+			roundRect(ctx, x1 + 5, hy, x2 - 5, hy + rowH, pal.soft());
+			fill(ctx, x1 + 5, hy + 4, x1 + 6, hy + rowH - 4, pal.accent());
+		}
 		for (Category cat : cats) {
 			boolean active = cat == category && query.isEmpty();
 			boolean hover = inside(mouseX, mouseY, x1, Math.max(y, top), x2, Math.min(y + rowH, y2));
 			int bx1 = x1 + 5, bx2 = x2 - 5;
-			if (active) roundRect(ctx, bx1, y, bx2, y + rowH, pal.soft());
-			else if (hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
+			if (!active && hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
 			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), bx1 + 2, y + 2, 16);
 			if (railW > 40) {
 				String count = cat == Category.ALL ? "" : String.valueOf(cat.parts().isEmpty() ? cat.items().size() : cat.parts().size());
@@ -772,7 +863,7 @@ public final class StudioScreen extends Screen {
 				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
 				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
 				String id = t.key;
-				if (config.styles.containsKey(id) || config.hasAdjust(id)) {
+				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)) {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
@@ -916,7 +1007,8 @@ public final class StudioScreen extends Screen {
 		}
 
 		int gap = 6;
-		int cols = Math.max(2, (w + gap) / (58 + gap));
+		int minCard = config.cardSize <= 0 ? 46 : config.cardSize >= 2 ? 80 : 58;
+		int cols = Math.max(2, (w + gap) / (minCard + gap));
 		int cardW = (w - gap * (cols - 1)) / cols;
 		int prev = cardW - 8;
 		int cardH = 4 + prev + 4 + 20 + smallH() + 1;
@@ -935,6 +1027,11 @@ public final class StudioScreen extends Screen {
 			if (cy + cardH < top || cy > bottom) continue;
 			boolean on = current == null ? card.sourceId == null : card.ids.contains(current);
 			boolean hover = inside(mouseX, mouseY, cx, Math.max(cy, top), cx + cardW, Math.min(cy + cardH, bottom));
+			if (hover && !on) {
+				// lift the card a little, with a soft shadow under it
+				fill(ctx, cx + 2, cy + cardH - 1, cx + cardW - 2, cy + cardH + 1, 0x40000000);
+				cy -= 1;
+			}
 			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, on ? pal.cardOn() : hover ? pal.surfaceHover() : pal.surface());
 			if (on) {
 				outline(ctx, cx, cy, cx + cardW, cy + cardH, pal.accent());
@@ -1126,7 +1223,7 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
 		Target sideTarget = current();
 		if (sideTarget != null && sideTarget.isPart()) {
-			drawPartSide(ctx, sideTarget, x1, x2, top);
+			drawPartSide(ctx, sideTarget, x1, x2, top, bottom, mouseX, mouseY);
 			return;
 		}
 		if (selected == null) {
@@ -1139,6 +1236,7 @@ public final class StudioScreen extends Screen {
 		int content = 400;
 		int off = scrollOf("side", content, bottom - top);
 		ctx.enableScissor(x1, top, x2, bottom);
+		int firstHit = hits.size();
 		int y = top + 8 - off;
 
 		// preview stage: the chosen style's texture, big
@@ -1234,24 +1332,34 @@ public final class StudioScreen extends Screen {
 		y += 12;
 		y = smallWrapped(ctx, "Right-click a slider to reset it", ix1, y, iw, MUTED);
 		ctx.disableScissor();
+		clipHits(firstHit, top, bottom);
 
 		int realContent = y + off - top + 6;
 		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
-	private void drawPartSide(DrawContext ctx, Target t, int x1, int x2, int top) {
+	private void drawPartSide(DrawContext ctx, Target t, int x1, int x2, int top, int bottom, int mouseX, int mouseY) {
 		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
-		int y = top + 8;
+		int off = scrollOf("side", 400, bottom - top);
+		ctx.enableScissor(x1, top, x2, bottom);
+		int firstHit = hits.size();
+		int y = top + 8 - off;
+		String key = t.key;
+		boolean resizable = t.part.resizable();
+		float size = resizable ? config.partSizeOf(key) : 1f;
 		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
 		outline(ctx, ix1, y, ix2, y + 56, pal.line());
-		String style = ready() ? styleOf(t.key) : null;
+		String style = ready() ? styleOf(key) : null;
 		PackSource src = style == null || index == null ? null : index.get(style);
+		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
+		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
+		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
 		boolean drawn = false;
 		if (src != null) {
-			drawn = drawPreview(ctx, src.id() + "|" + t.key, () -> previewOf(src, t), ix1 + iw / 2 - 20, y + 8, 40);
+			drawn = drawPreview(ctx, src.id() + "|" + key, () -> previewOf(src, t), bx, by, box);
 		}
-		if (!drawn) drawTargetIcon(ctx, t, ix1 + iw / 2 - 20, y + 8, 40);
+		if (!drawn) drawTargetIcon(ctx, t, bx, by, box);
 		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
 		y += 62;
 		bold(ctx, trim(t.part.label(), iw), ix1, y, TEXT);
@@ -1267,7 +1375,42 @@ public final class StudioScreen extends Screen {
 		y += 18;
 		fill(ctx, ix1, y, ix2, y + 1, pal.line());
 		y += 8;
-		smallWrapped(ctx, "These use the pack's textures as they are. Size and position are for items only.", ix1, y, iw, MUTED);
+		if (resizable) {
+			bold(ctx, "Size", ix1, y, TEXT);
+			String resetLabel = "Reset";
+			int rw = textW(resetLabel);
+			boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
+			text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
+			hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+				if (config.partSize.containsKey(key)) {
+					config.setPartSize(key, 1f);
+					changed(true);
+				}
+			}, null, "Back to normal size", null));
+			y += 14;
+			y = slider(ctx, "Particle size", "%", 0.1f, 2f, 0.05f, 1f, () -> config.partSizeOf(key),
+				v -> config.setPartSize(key, v), ix1, ix2, y, mouseX, mouseY, 100f);
+			String all = "Use this size for all particles";
+			boolean allHover = inside(mouseX, mouseY, ix1, y - 2, ix1 + textW(all), y + 10);
+			text(ctx, trim(all, iw), ix1, y, allHover ? 0xFFFFFFFF : pal.accentText());
+			hits.add(new Hit(ix1, y - 2, ix1 + Math.min(iw, textW(all)), y + 10, () -> {
+				float chosen = config.partSizeOf(key);
+				for (TexturePart p : Category.PARTICLES.parts()) config.setPartSize(p.key(), chosen);
+				changed(true);
+			}, null, "Every particle gets " + Math.round(size * 100) + "%", null));
+			y += 14;
+			y = smallWrapped(ctx, "Smaller works on every particle. Above 100% a particle only grows into empty space around"
+				+ " its picture; ones that fill their picture get their edges cut.", ix1, y, iw, MUTED);
+		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
+			y = smallWrapped(ctx, "Changes placed blocks and the block item together.", ix1, y, iw, MUTED);
+		} else {
+			y = smallWrapped(ctx, "These use the pack's textures as they are.", ix1, y, iw, MUTED);
+		}
+		ctx.disableScissor();
+		clipHits(firstHit, top, bottom);
+		int realContent = y + off - top + 6;
+		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
+		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
 	private int slider(DrawContext ctx, String label, String unit, float min, float max, float step, float def,
@@ -1301,7 +1444,10 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1, top, x2, bottom, pal.rail());
 		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
 		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
-		int y = top + 10;
+		int off = scrollOf("settings", 400, bottom - top);
+		ctx.enableScissor(x1, top, x2, bottom);
+		int firstHit = hits.size();
+		int y = top + 10 - off;
 		bold(ctx, "Settings", ix1, y, TEXT);
 		// mod on/off switch, right side of the title row
 		boolean modOn = config.enabled;
@@ -1318,27 +1464,30 @@ public final class StudioScreen extends Screen {
 		}, null, "Turn Item Studio on or off. Off puts your normal packs back; your picks stay saved.", null));
 		y += 16;
 
+		// theme: colour swatches, 6 to a row
 		text(ctx, "Theme", ix1, y, TEXT2);
+		String themeName = theme().label;
+		text(ctx, themeName, ix2 - textW(themeName), y, pal.accentText());
 		y += 12;
 		Theme[] themes = Theme.values();
 		int gap = 4;
-		int tw = (iw - gap) / 2;
+		int perRow = 6;
+		int sw = (iw - gap * (perRow - 1)) / perRow;
 		for (int i = 0; i < themes.length; i++) {
 			Theme t = themes[i];
-			int tx = ix1 + (i % 2) * (tw + gap);
-			int ty = y + (i / 2) * 18;
+			int tx = ix1 + (i % perRow) * (sw + gap);
+			int ty = y + (i / perRow) * 18;
 			boolean on = t == theme();
-			boolean hover = inside(mouseX, mouseY, tx, ty, tx + tw, ty + 15);
-			roundRect(ctx, tx, ty, tx + tw, ty + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-			outline(ctx, tx, ty, tx + tw, ty + 15, on ? pal.accent() : pal.surfaceBorder());
-			roundRect(ctx, tx + 4, ty + 4, tx + 11, ty + 11, 0xFF000000 | t.accent);
-			text(ctx, t.label, tx + 15, ty + 4, on ? 0xFFFFFFFF : TEXT2);
-			hits.add(new Hit(tx, ty, tx + tw, ty + 15, () -> {
+			boolean hover = inside(mouseX, mouseY, tx, ty, tx + sw, ty + 14);
+			if (on || hover) outline(ctx, tx - 1, ty - 1, tx + sw + 1, ty + 15, on ? 0xFFFFFFFF : pal.accentText());
+			roundRect(ctx, tx + 1, ty + 1, tx + sw - 1, ty + 13, 0xFF000000 | t.base);
+			roundRect(ctx, tx + 3, ty + 3, tx + sw - 3, ty + 11, 0xFF000000 | t.accent);
+			hits.add(new Hit(tx, ty, tx + sw, ty + 14, () -> {
 				config.theme = t.name();
 				config.save();
-			}, null, null, null));
+			}, null, t.label, null));
 		}
-		y += 3 * 18 + 6;
+		y += ((themes.length + perRow - 1) / perRow) * 18 + 4;
 
 		y = slider(ctx, "Opacity", "%", 0.4f, 1f, 0.05f, 0.78f, () -> config.opacity,
 			v -> {
@@ -1347,29 +1496,67 @@ public final class StudioScreen extends Screen {
 			}, ix1, ix2, y, mouseX, mouseY, 100f);
 		y += 4;
 
+		// fonts: each name is shown in its own font
 		text(ctx, "Text font", ix1, y, TEXT2);
 		y += 12;
-		String[] fonts = {"Minecraft", "Poppins"};
-		for (int i = 0; i < 2; i++) {
-			int fx = ix1 + i * (tw + gap);
-			boolean on = config.customFont == (i == 1);
-			boolean hover = inside(mouseX, mouseY, fx, y, fx + tw, y + 15);
-			roundRect(ctx, fx, y, fx + tw, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-			outline(ctx, fx, y, fx + tw, y + 15, on ? pal.accent() : pal.surfaceBorder());
-			text(ctx, fonts[i], fx + (tw - textW(fonts[i])) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
-			final boolean custom = i == 1;
-			hits.add(new Hit(fx, y, fx + tw, y + 15, () -> {
-				config.customFont = custom;
+		MenuFont[] fonts = MenuFont.values();
+		int fw = (iw - gap) / 2;
+		MenuFont currentFont = menuFont();
+		for (int i = 0; i < fonts.length; i++) {
+			MenuFont f = fonts[i];
+			int fx = ix1 + (i % 2) * (fw + gap);
+			int fy = y + (i / 2) * 18;
+			boolean on = f == currentFont;
+			boolean hover = inside(mouseX, mouseY, fx, fy, fx + fw, fy + 15);
+			roundRect(ctx, fx, fy, fx + fw, fy + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+			outline(ctx, fx, fy, fx + fw, fy + 15, on ? pal.accent() : pal.surfaceBorder());
+			MutableText label = styledIn(f.label, f, false);
+			int lw = textRenderer.getWidth(label);
+			if (lw > fw - 6) {
+				label = styledIn(f.label.substring(0, Math.min(f.label.length(), 9)) + ".", f, false);
+				lw = textRenderer.getWidth(label);
+			}
+			ctx.drawText(textRenderer, label, fx + (fw - lw) / 2, fy + 4, on ? 0xFFFFFFFF : TEXT2, false);
+			hits.add(new Hit(fx, fy, fx + fw, fy + 15, () -> {
+				config.setFont(f.id);
 				config.save();
-			}, null, null, null));
+			}, null, f.label, null));
 		}
-		y += 24;
+		y += ((fonts.length + 1) / 2) * 18 + 4;
+
+		// style card size
+		text(ctx, "Card size", ix1, y, TEXT2);
+		y += 12;
+		String[] sizes = {"Small", "Medium", "Large"};
+		int segW = (iw - gap * 2) / 3;
+		for (int i = 0; i < 3; i++) {
+			int sx = ix1 + i * (segW + gap);
+			boolean on = config.cardSize == i;
+			boolean hover = inside(mouseX, mouseY, sx, y, sx + segW, y + 15);
+			roundRect(ctx, sx, y, sx + segW, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
+			outline(ctx, sx, y, sx + segW, y + 15, on ? pal.accent() : pal.surfaceBorder());
+			String l = trim(sizes[i], segW - 4);
+			text(ctx, l, sx + (segW - textW(l)) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
+			final int value = i;
+			hits.add(new Hit(sx, y, sx + segW, y + 15, () -> {
+				config.cardSize = value;
+				config.save();
+			}, null, "Size of the style cards", null));
+		}
+		y += 22;
+
 		String keyName = ItemStudioClient.openKey().getBoundKeyLocalizedText().getString();
-		y = smallWrapped(ctx, "Menu key: " + keyName, ix1, y, iw, MUTED) + 6;
+		y = smallWrapped(ctx, "Menu key: " + keyName + ". Ctrl+Z undoes, Ctrl+F searches.", ix1, y, iw, MUTED) + 6;
 		int half = (iw - gap) / 2;
 		button(ctx, ix1, y, half, 16, "Keybinds", false, false, mouseX, mouseY,
 			() -> client.setScreen(new StudioConfigScreen(this)), "Change the menu key and the on/off key");
 		button(ctx, ix1 + half + gap, y, iw - half - gap, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
+		y += 22;
+		ctx.disableScissor();
+		clipHits(firstHit, top, bottom);
+		int realContent = y + off - top;
+		scroll.put("settings", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("settings", 0))));
+		scrollAreas.add(new ScrollArea("settings", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
 	}
 
 	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
@@ -1409,9 +1596,13 @@ public final class StudioScreen extends Screen {
 		fill(ctx, right, y + 2, right + 1, y + 14, pal.line2());
 
 		boolean small = pw < 520;
+		String undoLabel = "Undo";
+		int uw = textW(undoLabel) + 12;
+		right -= uw + 6;
+		flatButton(ctx, right, y, uw, 16, undoLabel, mouseX, mouseY, this::undo, "Undo the last change (Ctrl+Z)");
 		String rescan = "Rescan";
 		int rw = textW(rescan) + 12;
-		right -= rw + 6;
+		right -= rw + 2;
 		flatButton(ctx, right, y, rw, 16, rescan, mouseX, mouseY, this::rescan, "Look for new packs in the resourcepacks folder");
 		String folder = small ? "Folder" : "Packs folder";
 		int fw = textW(folder) + 12;
@@ -1562,6 +1753,16 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** Adds a click area clipped to a scrolling region's visible part. */
+	/** Cuts the click areas added since index first down to a scrolled panel's visible part. */
+	private void clipHits(int first, int top, int bottom) {
+		for (int i = hits.size() - 1; i >= first; i--) {
+			Hit h = hits.get(i);
+			int y1 = Math.max(h.y1, top), y2 = Math.min(h.y2, bottom);
+			if (y2 <= y1) hits.remove(i);
+			else if (y1 != h.y1 || y2 != h.y2) hits.set(i, new Hit(h.x1, y1, h.x2, y2, h.action, h.rightAction, h.tooltip, h.slider));
+		}
+	}
+
 	private void addHit(int x1, int y1, int x2, int y2, int clipTop, int clipBottom, Runnable action, Runnable right, String tooltip) {
 		int top = Math.max(y1, clipTop);
 		int bottom = Math.min(y2, clipBottom);
@@ -1685,6 +1886,17 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(KeyInput input) {
+		boolean typing = search.isFocused() || styleSearch.isFocused();
+		if (input.hasCtrlOrCmd() && input.getKeycode() == org.lwjgl.glfw.GLFW.GLFW_KEY_Z && !typing) {
+			undo();
+			return true;
+		}
+		if (input.hasCtrlOrCmd() && input.getKeycode() == org.lwjgl.glfw.GLFW.GLFW_KEY_F) {
+			setFocused(search);
+			search.setFocused(true);
+			styleSearch.setFocused(false);
+			return true;
+		}
 		if (input.isEscape()) {
 			if (settingsOpen) {
 				settingsOpen = false;

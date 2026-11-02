@@ -15,7 +15,11 @@ public enum ParticleElement implements TexturePart {
 	LOVE("Love hearts", "heart.png", "heart", "angry"),
 	FLAME("Flames", "flame.png", "flame", "soul_fire_flame", "lava"),
 	WATER("Splash & bubbles", "splash_0.png", "splash_", "bubble", "drip_"),
-	FIREWORK("Firework sparks", "spark_0.png", "spark_", "flash");
+	FIREWORK("Firework sparks", "spark_0.png", "spark_", "flash"),
+	GUST("Wind charge gusts", "gust_0.png", "gust_", "small_gust_"),
+	ENCHANT("Enchant glyphs", "sga_a.png", "sga_"),
+	SONIC("Sonic boom", "sonic_boom_0.png", "sonic_boom_"),
+	SNOW("Snowflakes", "snowflake.png", "snowflake");
 
 	public static final String BASE = "assets/minecraft/textures/particle/";
 	public static final String KEY_PREFIX = "particle:";
