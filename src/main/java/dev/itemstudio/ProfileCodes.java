@@ -63,6 +63,7 @@ public final class ProfileCodes {
 			if (profile.styles == null) profile.styles = new java.util.TreeMap<>();
 			if (profile.adjust == null) profile.adjust = new java.util.TreeMap<>();
 			if (profile.partSize == null) profile.partSize = new java.util.TreeMap<>();
+			if (profile.recolor == null) profile.recolor = new java.util.TreeMap<>();
 			String name = json.getAsJsonObject().has("name") ? json.getAsJsonObject().get("name").getAsString() : "Imported";
 			name = name.replaceAll("[\\p{Cntrl}]", "").trim();
 			if (name.isEmpty()) name = "Imported";

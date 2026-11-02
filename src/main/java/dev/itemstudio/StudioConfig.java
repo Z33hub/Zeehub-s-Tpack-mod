@@ -41,17 +41,21 @@ public final class StudioConfig {
 	public int cardSize = 1;
 	/** Particle size per part key ("particle:crit"): 1 = normal size. */
 	public Map<String, Float> partSize = new TreeMap<>();
+	/** Colour change per item id or part key. */
+	public Map<String, Recolor> recolor = new TreeMap<>();
 
 	/** A saved set of choices: what is styled, size changes and particle sizes. */
 	public static final class Profile {
 		public Map<String, String> styles = new TreeMap<>();
 		public Map<String, Map<String, Adjust>> adjust = new TreeMap<>();
 		public Map<String, Float> partSize = new TreeMap<>();
+		public Map<String, Recolor> recolor = new TreeMap<>();
 
 		public int count() {
 			java.util.Set<String> keys = new java.util.HashSet<>(styles.keySet());
 			keys.addAll(adjust.keySet());
 			keys.addAll(partSize.keySet());
+			if (recolor != null) keys.addAll(recolor.keySet());
 			return keys.size();
 		}
 	}
@@ -90,6 +94,8 @@ public final class StudioConfig {
 					if (config.styles == null) config.styles = new TreeMap<>();
 					if (config.adjust == null) config.adjust = new TreeMap<>();
 					if (config.partSize == null) config.partSize = new TreeMap<>();
+					if (config.recolor == null) config.recolor = new TreeMap<>();
+					config.recolor = new TreeMap<>(config.recolor);
 					config.partSize = new TreeMap<>(config.partSize);
 					config.styles = new TreeMap<>(config.styles);
 					config.adjust = new TreeMap<>(config.adjust);
@@ -145,6 +151,7 @@ public final class StudioConfig {
 		p.styles = new TreeMap<>(styles);
 		p.adjust = copyAdjust(adjust);
 		p.partSize = new TreeMap<>(partSize);
+		p.recolor = copyRecolor(recolor);
 		return p;
 	}
 
@@ -161,6 +168,26 @@ public final class StudioConfig {
 		styles = new TreeMap<>(p.styles == null ? Map.of() : p.styles);
 		adjust = copyAdjust(p.adjust == null ? Map.of() : p.adjust);
 		partSize = new TreeMap<>(p.partSize == null ? Map.of() : p.partSize);
+		recolor = copyRecolor(p.recolor == null ? Map.of() : p.recolor);
+	}
+
+	private static Map<String, Recolor> copyRecolor(Map<String, Recolor> from) {
+		Map<String, Recolor> copy = GSON.fromJson(GSON.toJson(from),
+			new com.google.gson.reflect.TypeToken<TreeMap<String, Recolor>>() {}.getType());
+		return copy == null ? new TreeMap<>() : new TreeMap<>(copy);
+	}
+
+	public Recolor getRecolor(String key) {
+		return recolor.get(key);
+	}
+
+	public Recolor editRecolor(String key) {
+		return recolor.computeIfAbsent(key, k -> new Recolor());
+	}
+
+	public boolean hasRecolor(String key) {
+		Recolor r = recolor.get(key);
+		return r != null && !r.isDefault();
 	}
 
 	/** base, or "base 2", "base 3"... whichever is free. */
@@ -206,6 +233,7 @@ public final class StudioConfig {
 	/** Drops empty entries so the file stays tidy and unchanged items are not rebuilt. */
 	public void cleanUp() {
 		partSize.values().removeIf(v -> v == null || Math.abs(v - 1f) < 1e-3f);
+		recolor.values().removeIf(r -> r == null || r.isDefault());
 		adjust.values().forEach(views -> views.values().removeIf(Adjust::isDefault));
 		adjust.values().removeIf(Map::isEmpty);
 	}
