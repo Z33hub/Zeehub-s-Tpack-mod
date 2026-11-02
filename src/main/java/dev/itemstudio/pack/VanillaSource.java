@@ -9,7 +9,7 @@ import java.util.Map;
 /** The game's own textures and models, so an item can be forced back to vanilla even when another pack changes it. */
 public final class VanillaSource implements PackSource {
 	public static final String ID = "vanilla";
-	private final Map<String, byte[]> cache = new HashMap<>();
+	private final Map<String, byte[]> cache = new java.util.concurrent.ConcurrentHashMap<>();
 	private static final byte[] MISSING = new byte[0];
 
 	@Override

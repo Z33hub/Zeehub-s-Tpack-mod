@@ -82,6 +82,10 @@ public enum BlockElement implements TexturePart {
 		return itemId;
 	}
 
+	String[] patterns() {
+		return patterns;
+	}
+
 	public static BlockElement of(String path) {
 		for (BlockElement e : values()) {
 			if (Glob.texture(path, e.patterns)) return e;
