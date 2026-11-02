@@ -28,6 +28,7 @@ public final class ItemStudioClient implements ClientModInitializer {
 	private static KeyMapping openKey;
 	private static KeyMapping toggleKey;
 	private static KeyMapping nextProfileKey;
+	private static boolean warmedUp;
 
 	@Override
 	public void onInitializeClient() {
@@ -42,6 +43,13 @@ public final class ItemStudioClient implements ClientModInitializer {
 			new KeyMapping("key.itemstudio.next_profile", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			// once the game has finished loading: scan packs in the background (so the menu opens at once)
+			// and look for a newer version
+			if (!warmedUp && client.getOverlay() == null) {
+				warmedUp = true;
+				dev.itemstudio.pack.PackIndexCache.prewarm();
+				UpdateCheck.start();
+			}
 			while (openKey.consumeClick()) {
 				if (client.gui.screen() == null) {
 					client.gui.setScreen(new StudioScreen(null));

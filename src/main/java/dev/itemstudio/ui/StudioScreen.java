@@ -94,7 +94,9 @@ public final class StudioScreen extends Screen {
 
 	private final Screen parent;
 	private final StudioConfig config = StudioConfig.get();
-	private final PreviewTextures previews = new PreviewTextures();
+	/** Card pictures, kept between menu visits; cleared when the pack scan changes. */
+	private static final PreviewTextures previews = new PreviewTextures();
+	private static int previewGeneration = -1;
 	private final Map<Item, ItemStack> stacks = new HashMap<>();
 	private final List<Hit> hits = new ArrayList<>();
 	private final List<ScrollArea> scrollAreas = new ArrayList<>();
@@ -104,7 +106,7 @@ public final class StudioScreen extends Screen {
 		new com.google.gson.reflect.TypeToken<java.util.TreeMap<String, java.util.TreeMap<String, Adjust>>>() {}.getType();
 
 	/** Everything the user picks, for undo. */
-	private record State(Map<String, String> styles, String adjust, Map<String, Float> partSize) {
+	private record State(Map<String, String> styles, String adjust, Map<String, Float> partSize, String crosshair) {
 	}
 
 	private final java.util.ArrayDeque<State> history = new java.util.ArrayDeque<>();
@@ -139,6 +141,10 @@ public final class StudioScreen extends Screen {
 	private boolean renamingProfile;
 	private int profileChipX;
 	private long deleteArmedUntil;
+	/** Crosshair editor grid, as last drawn. */
+	private int crossX, crossY, crossCell, crossTop, crossBottom;
+	private boolean crossShown, painting, paintOn;
+	private String seedKey, seedPattern;
 	private Theme.Palette pal;
 
 	// layout
@@ -217,15 +223,10 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public void removed() {
-		previews.clear();
-		if (index != null) {
-			index.close();
-		} else if (loading != null) {
-			loading.thenAccept(PackIndex::close);
-		}
+		// The scan and pictures are kept for next time; only the open pack files are closed.
+		if (index != null) index.close();
 		index = null;
 		loading = null;
-		ItemInfo.clearCache();
 	}
 
 	// ------------------------------------------------------------------ text with the menu font
@@ -348,7 +349,7 @@ public final class StudioScreen extends Screen {
 
 	private void startScan(String message) {
 		setStatus(message, MUTED);
-		loading = CompletableFuture.supplyAsync(PackIndex::scan);
+		loading = dev.itemstudio.pack.PackIndexCache.get();
 	}
 
 	private boolean ready() {
@@ -387,12 +388,13 @@ public final class StudioScreen extends Screen {
 		for (String id : ids) {
 			map.put(id, config.styles.get(id) + "|" + SNAPSHOT_GSON.toJson(config.adjust.get(id)) + "|" + config.partSize.get(id));
 		}
+		if (config.crosshair != null) map.put("crosshair:drawn", config.crosshair);
 		return map;
 	}
 
 	private State captureState() {
 		return new State(new java.util.TreeMap<>(config.styles), SNAPSHOT_GSON.toJson(config.adjust),
-			new java.util.TreeMap<>(config.partSize));
+			new java.util.TreeMap<>(config.partSize), config.crosshair);
 	}
 
 	private void pushHistory() {
@@ -414,6 +416,7 @@ public final class StudioScreen extends Screen {
 		java.util.Map<String, java.util.Map<String, Adjust>> adjust = SNAPSHOT_GSON.fromJson(back.adjust(), ADJUST_TYPE);
 		config.adjust = adjust == null ? new java.util.TreeMap<>() : new java.util.TreeMap<>(adjust);
 		config.partSize = new java.util.TreeMap<>(back.partSize());
+		config.crosshair = back.crosshair();
 		changed(false);
 		setStatus("Undone" + (pending > 0 ? " - " + pending + " item" + (pending == 1 ? "" : "s") + " changed" : ""), pending > 0 ? WARN : MUTED);
 	}
@@ -466,8 +469,8 @@ public final class StudioScreen extends Screen {
 
 	private void rescan() {
 		if (index == null) return;
+		dev.itemstudio.pack.PackIndexCache.invalidate();
 		previews.clear();
-		index.close();
 		index = null;
 		ItemInfo.clearCache();
 		startScan("Rescanning packs...");
@@ -718,7 +721,13 @@ public final class StudioScreen extends Screen {
 	public void extractRenderState(GuiGraphicsExtractor ctx, int mouseX, int mouseY, float delta) {
 		hits.clear();
 		scrollAreas.clear();
+		crossShown = false;
 		pal = theme().palette(config.opacity);
+		int generation = dev.itemstudio.pack.PackIndexCache.generation();
+		if (generation != previewGeneration || previews.size() > 3000) {
+			previews.clear();
+			previewGeneration = generation;
+		}
 		ready();
 
 		roundRect(ctx, px, py, px + pw, py + ph, pal.panel());
@@ -775,6 +784,21 @@ public final class StudioScreen extends Screen {
 		Target shownTarget = current();
 		String item = shownTarget == null ? "" : nameOf(shownTarget);
 		int roomEnd = search.getX() - 12;
+		dev.itemstudio.UpdateCheck.Update update = dev.itemstudio.UpdateCheck.found();
+		if (update != null) {
+			String label = "Update " + update.version();
+			int uw = textW(label) + 12;
+			int ux = search.getX() - 16 - 6 - uw;
+			boolean uh = inside(mouseX, mouseY, ux, py + 4, ux + uw, py + 20);
+			roundRect(ctx, ux, py + 4, ux + uw, py + 20, uh ? pal.strongHover() : pal.strong());
+			text(ctx, label, ux + 6, py + 8, 0xFFFFFFFF);
+			hits.add(new Hit(ux, py + 4, ux + uw, py + 20, () -> {
+				java.net.URI releasePage = java.net.URI.create(update.url());
+				Util.getPlatform().openUri(releasePage);
+			}, null, "Item Studio " + update.version() + " is out (you have " + dev.itemstudio.UpdateCheck.currentVersion()
+				+ "). MouseButtonEvent to open the download page.", null));
+			roomEnd = ux - 8;
+		}
 		if (roomEnd - crumbX > 60) {
 			String crumb = trim(where + "  /  " + item, roomEnd - crumbX - 8);
 			text(ctx, crumb, crumbX + 8, py + 8, MUTED);
@@ -899,7 +923,8 @@ public final class StudioScreen extends Screen {
 				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
 				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
 				String id = t.key;
-				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)) {
+				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)
+					|| (config.crosshair != null && id.equals(dev.itemstudio.pack.HudElement.CROSSHAIR.key()))) {
 					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
 				}
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
@@ -1399,7 +1424,10 @@ public final class StudioScreen extends Screen {
 		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
 		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
 		boolean drawn = false;
-		if (t.part.heightAdjustable() && config.partSize.containsKey(key)) {
+		if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR && config.crosshair != null) {
+			String drawnCross = config.crosshair;
+			drawn = drawPreview(ctx, "cross|" + drawnCross, () -> crosshairPng(drawnCross), bx, by, box);
+		} else if (t.part.heightAdjustable() && config.partSize.containsKey(key)) {
 			// show the lowered fire
 			float height = config.partSizeOf(key);
 			String file = t.part.preview();
@@ -1471,6 +1499,8 @@ public final class StudioScreen extends Screen {
 				v -> config.setPartSize(key, v), ix1, ix2, y, mouseX, mouseY, 100f);
 			y = smallWrapped(ctx, "Lower = less fire on your screen when you burn. Fire on burning blocks and mobs gets"
 				+ " lower too, because the game uses the same picture.", ix1, y, iw, MUTED);
+		} else if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR) {
+			y = drawCrosshairEditor(ctx, ix1, ix2, y, top, bottom, mouseX, mouseY);
 		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
 			y = smallWrapped(ctx, "Changes placed blocks and the block item together.", ix1, y, iw, MUTED);
 		} else {
@@ -1481,6 +1511,142 @@ public final class StudioScreen extends Screen {
 		int realContent = y + off - top + 6;
 		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
 		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+	}
+
+	private static final String[] CROSS_PRESETS = {"Plus", "Gap", "Dot", "Circle", "X", "Clear"};
+
+	/** A 15x15 grid to draw a crosshair on, with a few ready-made shapes. Returns the y below it. */
+	private int drawCrosshairEditor(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int top, int bottom, int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		bold(ctx, "Draw your own", ix1, y, TEXT);
+		if (config.crosshair != null) {
+			String off = "Turn off";
+			int ow = textW(off);
+			boolean oh = inside(mouseX, mouseY, ix2 - ow - 2, y - 2, ix2, y + 10);
+			text(ctx, off, ix2 - ow, y, oh ? 0xFFFFFFFF : pal.accentText());
+			hits.add(new Hit(ix2 - ow - 2, y - 2, ix2, y + 10, () -> {
+				config.crosshair = null;
+				changed(true);
+			}, null, "Go back to the picked crosshair style", null));
+		}
+		y += 14;
+		int cell = Math.max(4, Math.min(8, iw / 15));
+		int size = cell * 15;
+		int gx = ix1 + (iw - size) / 2;
+		roundRect(ctx, gx - 3, y - 3, gx + size + 3, y + size + 3, pal.well());
+		String pattern = config.crosshair != null ? config.crosshair : crosshairSeed();
+		int gap = cell > 4 ? 1 : 0;
+		int hoverC = (int) Math.floor((mouseX - gx) / (double) cell), hoverR = (int) Math.floor((mouseY - y) / (double) cell);
+		for (int r = 0; r < 15; r++) {
+			for (int c = 0; c < 15; c++) {
+				boolean on = pattern.charAt(r * 15 + c) == '1';
+				int color = on ? (config.crosshair != null ? 0xFFFFFFFF : 0x99FFFFFF)
+					: (r == 7 && c == 7) ? pal.soft() : ((r + c) % 2 == 0 ? 0x16FFFFFF : 0x0AFFFFFF);
+				int cx = gx + c * cell, cy = y + r * cell;
+				fill(ctx, cx, cy, cx + cell - gap, cy + cell - gap, color);
+				if (r == hoverR && c == hoverC) outline(ctx, cx - 1, cy - 1, cx + cell, cy + cell, pal.accent());
+			}
+		}
+		crossX = gx;
+		crossY = y;
+		crossCell = cell;
+		crossTop = top;
+		crossBottom = bottom;
+		crossShown = true;
+		y += size + 8;
+		int bw = (iw - 8) / 3;
+		for (int i = 0; i < CROSS_PRESETS.length; i++) {
+			String name = CROSS_PRESETS[i];
+			button(ctx, ix1 + (i % 3) * (bw + 4), y + (i / 3) * 18, bw, 15, name, false, false, mouseX, mouseY, () -> {
+				config.crosshair = crosshairPreset(name);
+				changed(true);
+			}, name.equals("Clear") ? "Start from an empty grid" : "Start from a " + name.toLowerCase(Locale.ROOT) + " shape");
+		}
+		y += 2 * 18 + 2;
+		return smallWrapped(ctx, config.crosshair == null
+			? "This is the crosshair you have now. MouseButtonEvent a square or a shape to start drawing."
+			: "MouseButtonEvent to draw, right-click to erase. The game flips the colours behind the crosshair, so it stays easy"
+			+ " to see.", ix1, y, iw, MUTED);
+	}
+
+	/** The crosshair the game shows now (or the picked style's), as 225 '0'/'1' characters. */
+	private String crosshairSeed() {
+		String style = styleOf(dev.itemstudio.pack.HudElement.CROSSHAIR.key());
+		String k = String.valueOf(style) + "|" + (index == null);
+		if (k.equals(seedKey) && seedPattern != null) return seedPattern;
+		PackSource src = style == null || index == null ? null : index.get(style);
+		byte[] png = src != null ? readWithBelow(src, PackBuilder.CROSSHAIR_FILE) : Resources.readBelow(PackBuilder.CROSSHAIR_FILE);
+		dev.itemstudio.pack.Png.Image img = dev.itemstudio.pack.Png.decode(png);
+		StringBuilder b = new StringBuilder();
+		for (int r = 0; r < 15; r++) {
+			for (int c = 0; c < 15; c++) {
+				boolean on = img != null && (img.get(c * img.width() / 15, r * img.height() / 15) >>> 24) > 0;
+				b.append(on ? '1' : '0');
+			}
+		}
+		seedKey = k;
+		seedPattern = b.toString();
+		return seedPattern;
+	}
+
+	private static byte[] crosshairPng(String pattern) {
+		int[] px = new int[225];
+		for (int i = 0; i < 225; i++) px[i] = pattern.charAt(i) == '1' ? 0xFFFFFFFF : 0;
+		return dev.itemstudio.pack.Png.encode(15, 15, px);
+	}
+
+	private static String crosshairPreset(String name) {
+		char[] p = "0".repeat(225).toCharArray();
+		java.util.function.BiConsumer<Integer, Integer> set = (r, c) -> p[r * 15 + c] = '1';
+		switch (name) {
+			case "Plus" -> {
+				for (int i = 3; i <= 11; i++) {
+					set.accept(7, i);
+					set.accept(i, 7);
+				}
+			}
+			case "Gap" -> {
+				for (int i : new int[]{2, 3, 4, 5, 9, 10, 11, 12}) {
+					set.accept(7, i);
+					set.accept(i, 7);
+				}
+			}
+			case "Dot" -> {
+				set.accept(7, 7);
+				set.accept(6, 7);
+				set.accept(8, 7);
+				set.accept(7, 6);
+				set.accept(7, 8);
+			}
+			case "Circle" -> {
+				for (int r = 0; r < 15; r++) {
+					for (int c = 0; c < 15; c++) {
+						double d = Math.hypot(r - 7, c - 7);
+						if (Math.abs(d - 4.5) < 0.6) set.accept(r, c);
+					}
+				}
+			}
+			case "X" -> {
+				for (int i = 0; i <= 8; i++) {
+					set.accept(3 + i, 3 + i);
+					set.accept(3 + i, 11 - i);
+				}
+			}
+			default -> {
+			}
+		}
+		return new String(p);
+	}
+
+	/** Paints one crosshair square under the mouse. Returns false when the mouse isn't on the grid. */
+	private boolean paintCross(double mx, double my) {
+		if (!crossShown || my < crossTop || my >= crossBottom) return false;
+		int c = (int) Math.floor((mx - crossX) / crossCell), r = (int) Math.floor((my - crossY) / crossCell);
+		if (c < 0 || c >= 15 || r < 0 || r >= 15) return false;
+		char[] p = (config.crosshair != null ? config.crosshair : crosshairSeed()).toCharArray();
+		p[r * 15 + c] = paintOn ? '1' : '0';
+		config.crosshair = new String(p);
+		return true;
 	}
 
 	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
@@ -1615,6 +1781,19 @@ public final class StudioScreen extends Screen {
 		}
 		y += 22;
 
+		// update check switch
+		String upd = "Check for updates";
+		boolean updOn = config.checkUpdates;
+		roundRect(ctx, ix1, y + 1, ix1 + 18, y + 11, updOn ? pal.strong() : pal.line2());
+		int uk = updOn ? ix1 + 9 : ix1 + 1;
+		roundRect(ctx, uk, y + 2, uk + 8, y + 10, 0xFFFFFFFF);
+		text(ctx, trim(upd, iw - 24), ix1 + 23, y + 2, TEXT2);
+		hits.add(new Hit(ix1, y - 1, ix2, y + 13, () -> {
+			config.checkUpdates = !config.checkUpdates;
+			config.save();
+		}, null, "Look for a newer Item Studio on GitHub once per game session", null));
+		y += 18;
+
 		String keyName = ItemStudioClient.openKey().getTranslatedKeyMessage().getString();
 		y = smallWrapped(ctx, "Menu key: " + keyName + ". Ctrl+Z undoes, Ctrl+F searches.", ix1, y, iw, MUTED) + 6;
 		int half = (iw - gap) / 2;
@@ -1638,7 +1817,7 @@ public final class StudioScreen extends Screen {
 		int w = 196, rowH = 14;
 		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 2;
 		int hintH = 2 * smallH() + 2;
-		int h = 22 + names.size() * rowH + 8 + 3 * 18 + hintH + 6;
+		int h = 22 + names.size() * rowH + 8 + 4 * 18 + hintH + 6;
 		fill(ctx, x + 3, y + 3, x + w + 3, y + h + 3, 0x66000000);
 		roundRect(ctx, x, y, x + w, y + h, Theme.argb(theme().base, 0.97f));
 		outline(ctx, x, y, x + w, y + h, pal.accent());
@@ -1689,8 +1868,32 @@ public final class StudioScreen extends Screen {
 			"Copy a code for this profile to send to a friend");
 		button(ctx, b2, ry, bw, 15, "Paste code", false, false, mouseX, mouseY, this::pasteProfileCode,
 			"Add a profile from a code you copied");
+		ry += 18;
+		button(ctx, x + 8, ry, w - 16, 15, "Export as pack", false, true, mouseX, mouseY, this::exportPack,
+			"Save this profile as a normal resource pack zip that works without the mod");
 		ry += 20;
 		smallWrapped(ctx, "Switch in game with the Next profile key (set it in Keybinds).", x + 8, ry, w - 16, MUTED);
+	}
+
+	private void exportPack() {
+		if (!ready()) {
+			setStatus("Still reading your packs...", WARN);
+			return;
+		}
+		config.cleanUp();
+		PackBuilder builder = new PackBuilder(config, indexNow()).build();
+		if (builder.files().isEmpty()) {
+			setStatus("Nothing to export - " + config.activeProfile + " doesn't change anything", WARN);
+			return;
+		}
+		java.nio.file.Path zip = PackWriter.exportZip(builder.files(), config.activeProfile);
+		if (zip == null) {
+			setStatus("Could not export - see the game log", WARN);
+			return;
+		}
+		setStatus("Exported " + zip.getFileName() + " - works without the mod", GOOD);
+		java.nio.file.Path exportDir = PackWriter.exportFolder();
+		Util.getPlatform().openUri(exportDir.toUri());
 	}
 
 	private void closeProfiles() {
@@ -2064,6 +2267,15 @@ public final class StudioScreen extends Screen {
 			return super.mouseClicked(click, doubled);
 		}
 		if (renamingProfile) commitRename();
+		if (crossShown && !profilesOpen && !settingsOpen) {
+			int c = (int) Math.floor((x - crossX) / crossCell), r = (int) Math.floor((y - crossY) / crossCell);
+			if (c >= 0 && c < 15 && r >= 0 && r < 15 && y >= crossTop && y < crossBottom) {
+				String now = config.crosshair != null ? config.crosshair : crosshairSeed();
+				paintOn = click.button() == 0 && now.charAt(r * 15 + c) != '1';
+				painting = paintCross(x, y);
+				return true;
+			}
+		}
 		setFocused(null);
 		search.setFocused(false);
 		styleSearch.setFocused(false);
@@ -2097,6 +2309,10 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean mouseDragged(MouseButtonEvent click, double offsetX, double offsetY) {
+		if (painting) {
+			paintCross(click.x(), click.y());
+			return true;
+		}
 		if (dragging != null) {
 			dragging.setFromMouse(click.x());
 			return true;
@@ -2106,6 +2322,11 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean mouseReleased(MouseButtonEvent click) {
+		if (painting) {
+			painting = false;
+			changed(true);
+			return true;
+		}
 		if (dragging != null) {
 			boolean setting = dragging.label.equals("Opacity");
 			dragging = null;

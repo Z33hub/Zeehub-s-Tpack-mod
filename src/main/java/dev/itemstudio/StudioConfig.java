@@ -41,18 +41,23 @@ public final class StudioConfig {
 	public int cardSize = 1;
 	/** Particle size per part key ("particle:crit"): 1 = normal size. */
 	public Map<String, Float> partSize = new TreeMap<>();
+	/** Hand-drawn crosshair: 225 characters ('1' = pixel) for the 15x15 sprite, or null to not use one. */
+	public String crosshair = null;
+	/** Look for newer versions on GitHub once per session. */
+	public boolean checkUpdates = true;
 
 	/** A saved set of choices: what is styled, size changes and particle sizes. */
 	public static final class Profile {
 		public Map<String, String> styles = new TreeMap<>();
 		public Map<String, Map<String, Adjust>> adjust = new TreeMap<>();
 		public Map<String, Float> partSize = new TreeMap<>();
+		public String crosshair = null;
 
 		public int count() {
 			java.util.Set<String> keys = new java.util.HashSet<>(styles.keySet());
 			keys.addAll(adjust.keySet());
 			keys.addAll(partSize.keySet());
-			return keys.size();
+			return keys.size() + (crosshair != null ? 1 : 0);
 		}
 	}
 
@@ -145,6 +150,7 @@ public final class StudioConfig {
 		p.styles = new TreeMap<>(styles);
 		p.adjust = copyAdjust(adjust);
 		p.partSize = new TreeMap<>(partSize);
+		p.crosshair = crosshair;
 		return p;
 	}
 
@@ -161,6 +167,7 @@ public final class StudioConfig {
 		styles = new TreeMap<>(p.styles == null ? Map.of() : p.styles);
 		adjust = copyAdjust(p.adjust == null ? Map.of() : p.adjust);
 		partSize = new TreeMap<>(p.partSize == null ? Map.of() : p.partSize);
+		crosshair = p.crosshair;
 	}
 
 	/** base, or "base 2", "base 3"... whichever is free. */

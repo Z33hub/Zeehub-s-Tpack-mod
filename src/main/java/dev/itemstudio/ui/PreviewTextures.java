@@ -48,6 +48,10 @@ public final class PreviewTextures {
 		return preview == FAILED ? null : preview;
 	}
 
+	public int size() {
+		return loaded.size();
+	}
+
 	public void clear() {
 		for (Identifier id : registered) {
 			Minecraft.getInstance().getTextureManager().release(id);

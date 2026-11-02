@@ -20,14 +20,17 @@ public final class FilePackSource implements PackSource {
 	private final String id;
 	private final String name;
 	private final String tag;
-	private final ZipFile zip;
+	/** Open while files are being read; closed between menu visits so the pack file isn't locked. */
+	private ZipFile zip;
+	private final Path zipPath;
 	private final Path folder;
 	/** Lower-case path -> real path, because some packs use odd capitalisation in zips. */
 	private final Map<String, String> files = new HashMap<>();
 
-	private FilePackSource(String id, ZipFile zip, Path folder) {
+	private FilePackSource(String id, ZipFile zip, Path zipPath, Path folder) {
 		this.id = id;
 		this.zip = zip;
+		this.zipPath = zipPath;
 		this.folder = folder;
 		String shown = id.endsWith(".zip") ? id.substring(0, id.length() - 4) : id;
 		this.name = shown.replaceAll("§.", "").replace('_', ' ').trim();
@@ -40,7 +43,7 @@ public final class FilePackSource implements PackSource {
 		try {
 			if (Files.isDirectory(path)) {
 				if (!Files.exists(path.resolve("pack.mcmeta"))) return null;
-				FilePackSource source = new FilePackSource(fileName, null, path);
+				FilePackSource source = new FilePackSource(fileName, null, null, path);
 				try (Stream<Path> walk = Files.walk(path)) {
 					walk.filter(Files::isRegularFile).forEach(p -> {
 						String rel = path.relativize(p).toString().replace('\\', '/');
@@ -55,7 +58,7 @@ public final class FilePackSource implements PackSource {
 					zip.close();
 					return null;
 				}
-				FilePackSource source = new FilePackSource(fileName, zip, null);
+				FilePackSource source = new FilePackSource(fileName, zip, path, null);
 				zip.stream().filter(e -> !e.isDirectory()).forEach(e ->
 					source.files.put(e.getName().toLowerCase(Locale.ROOT), e.getName()));
 				return source;
@@ -90,10 +93,14 @@ public final class FilePackSource implements PackSource {
 	public byte[] read(String path) throws IOException {
 		String real = files.get(path.toLowerCase(Locale.ROOT));
 		if (real == null) throw new IOException("Not in pack: " + path);
-		if (zip != null) {
-			ZipEntry entry = zip.getEntry(real);
-			try (InputStream in = zip.getInputStream(entry)) {
-				return in.readAllBytes();
+		if (zipPath != null) {
+			synchronized (this) {
+				if (zip == null) zip = new ZipFile(zipPath.toFile());
+				ZipEntry entry = zip.getEntry(real);
+				if (entry == null) throw new IOException("Not in pack: " + path);
+				try (InputStream in = zip.getInputStream(entry)) {
+					return in.readAllBytes();
+				}
 			}
 		}
 		return Files.readAllBytes(folder.resolve(real));
@@ -104,13 +111,15 @@ public final class FilePackSource implements PackSource {
 		return Collections.unmodifiableCollection(files.values());
 	}
 
+	/** Closes the zip file. The file list stays, and the next read opens it again. */
 	@Override
-	public void close() {
+	public synchronized void close() {
 		if (zip != null) {
 			try {
 				zip.close();
 			} catch (IOException ignored) {
 			}
+			zip = null;
 		}
 	}
 }
