@@ -141,6 +141,14 @@ public final class ItemInfo {
 		return list;
 	}
 
+	/** True for items with a separate model while used, like the shield's shield_blocking. */
+	public boolean hasBlockingModel() {
+		for (String model : models) {
+			if (Refs.path(model).endsWith("_blocking")) return true;
+		}
+		return false;
+	}
+
 	public boolean hasWornLook() {
 		return !extraTextures.isEmpty();
 	}

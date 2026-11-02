@@ -23,6 +23,51 @@ public final class TextureScaler {
 	private TextureScaler() {
 	}
 
+	/**
+	 * Low fire: moves what is drawn in every frame down, so only the top "height" part of the flames is left at the
+	 * bottom of the picture. Returns null when the picture can't be read.
+	 */
+	public static byte[] lower(byte[] pngBytes, byte[] mcmeta, float height) {
+		Png.Image img = Png.decode(pngBytes);
+		if (img == null) return null;
+		int[] frame = frameSize(img.width(), img.height(), mcmeta);
+		if (frame == null) return null;
+		int fw = frame[0], fh = frame[1], w = img.width(), h = img.height();
+		int shift = Math.round(fh * (1f - Math.max(0f, Math.min(1f, height))));
+		if (shift <= 0) return pngBytes;
+		int[] out = new int[w * h];
+		for (int oy = 0; oy < h; oy += fh) {
+			for (int ox = 0; ox < w; ox += fw) {
+				for (int y = shift; y < fh; y++) {
+					for (int x = 0; x < fw; x++) {
+						out[(oy + y) * w + ox + x] = img.get(ox + x, oy + y - shift);
+					}
+				}
+			}
+		}
+		return Png.encode(w, h, out);
+	}
+
+	/** Frame width and height the way the game works them out, or null if they don't fit the picture. */
+	private static int[] frameSize(int w, int h, byte[] mcmeta) {
+		int fw = w, fh = h;
+		JsonElement json = mcmeta == null ? null : Resources.parse(mcmeta);
+		if (json != null && json.isJsonObject() && json.getAsJsonObject().has("animation")
+			&& json.getAsJsonObject().get("animation").isJsonObject()) {
+			JsonObject anim = json.getAsJsonObject().getAsJsonObject("animation");
+			if (anim.has("width")) {
+				fw = anim.get("width").getAsInt();
+				fh = anim.has("height") ? anim.get("height").getAsInt() : h;
+			} else if (anim.has("height")) {
+				fh = anim.get("height").getAsInt();
+			} else {
+				fw = fh = Math.min(w, h);
+			}
+		}
+		if (fw <= 0 || fh <= 0 || w % fw != 0 || h % fh != 0) return null;
+		return new int[]{fw, fh};
+	}
+
 	/** Returns null when the picture can't be read; the caller then keeps the file as it is. */
 	public static Result scale(byte[] pngBytes, byte[] mcmeta, float size) {
 		Png.Image img = Png.decode(pngBytes);

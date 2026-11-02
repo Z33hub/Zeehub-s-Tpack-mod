@@ -340,6 +340,7 @@ public final class StudioScreen extends Screen {
 			case GROUND -> "Drop";
 			case FRAME -> "Frame";
 			case HEAD -> "Head";
+			case BLOCKING -> "Block";
 		};
 	}
 
@@ -1317,12 +1318,14 @@ public final class StudioScreen extends Screen {
 		}, null, "Reset this view", null));
 		y += 14;
 
-		// view buttons, 3 per row
-		View[] views = View.values();
+		// view buttons, 3 per row ("While blocking" only for shields)
+		List<View> views = new ArrayList<>(List.of(View.values()));
+		if (!info.hasBlockingModel()) views.remove(View.BLOCKING);
+		if (!views.contains(view)) view = View.FIRST_PERSON;
 		int vgap = 3;
 		int vw = (iw - vgap * 2) / 3;
-		for (int i = 0; i < views.length; i++) {
-			View v = views[i];
+		for (int i = 0; i < views.size(); i++) {
+			View v = views.get(i);
 			int vx = ix1 + (i % 3) * (vw + vgap);
 			int vy = y + (i / 3) * 16;
 			boolean on = v == view;
@@ -1334,9 +1337,14 @@ public final class StudioScreen extends Screen {
 			String l = smallTrim(pixelFont() ? shortLabel(v) : v.label, vw - 4);
 			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + (pixelFont() ? 3 : 4), on ? 0xFFFFFFFF : edited ? pal.accentText() : TEXT2);
 			final View target = v;
-			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null, v.label, null));
+			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null,
+				v == View.BLOCKING ? "First person while you hold right-click" : v.label, null));
 		}
-		y += 2 * 16 + 4;
+		y += ((views.size() + 2) / 3) * 16 + 4;
+		if (view == View.BLOCKING) {
+			y = smallWrapped(ctx, "Only while you hold right-click. Make it smaller or move it down to see more"
+				+ " of the screen.", ix1, y, iw, MUTED) + 4;
+		}
 
 		Adjust current = config.getAdjust(itemId, view);
 		Adjust shown = current == null ? new Adjust() : current;
@@ -1391,7 +1399,17 @@ public final class StudioScreen extends Screen {
 		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
 		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
 		boolean drawn = false;
-		if (src != null) {
+		if (t.part.heightAdjustable() && config.partSize.containsKey(key)) {
+			// show the lowered fire
+			float height = config.partSizeOf(key);
+			String file = t.part.preview();
+			drawn = drawPreview(ctx, "low|" + style + "|" + Math.round(height * 100), () -> {
+				byte[] png = src != null ? readWithBelow(src, file) : Resources.readBelow(file);
+				byte[] meta = src != null ? readWithBelow(src, file + ".mcmeta") : Resources.readBelow(file + ".mcmeta");
+				byte[] low = png == null ? null : dev.itemstudio.pack.TextureScaler.lower(png, meta, height);
+				return low == null ? png : low;
+			}, bx, by, box);
+		} else if (src != null) {
 			drawn = drawPreview(ctx, src.id() + "|" + key, () -> previewOf(src, t), bx, by, box);
 		}
 		if (!drawn) drawTargetIcon(ctx, t, bx, by, box);
@@ -1436,6 +1454,23 @@ public final class StudioScreen extends Screen {
 			y += 14;
 			y = smallWrapped(ctx, "Smaller works on every particle. Above 100% a particle only grows into empty space around"
 				+ " its picture; ones that fill their picture get their edges cut.", ix1, y, iw, MUTED);
+		} else if (t.part.heightAdjustable()) {
+			bold(ctx, "Height", ix1, y, TEXT);
+			String resetLabel = "Reset";
+			int rw = textW(resetLabel);
+			boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
+			text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
+			hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+				if (config.partSize.containsKey(key)) {
+					config.setPartSize(key, 1f);
+					changed(true);
+				}
+			}, null, "Back to normal fire", null));
+			y += 14;
+			y = slider(ctx, "Fire height", "%", 0.1f, 1f, 0.05f, 1f, () -> config.partSizeOf(key),
+				v -> config.setPartSize(key, v), ix1, ix2, y, mouseX, mouseY, 100f);
+			y = smallWrapped(ctx, "Lower = less fire on your screen when you burn. Fire on burning blocks and mobs gets"
+				+ " lower too, because the game uses the same picture.", ix1, y, iw, MUTED);
 		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
 			y = smallWrapped(ctx, "Changes placed blocks and the block item together.", ix1, y, iw, MUTED);
 		} else {
