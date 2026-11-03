@@ -46,6 +46,22 @@ public final class StudioConfig {
 	/** Look for newer versions on GitHub once per session. */
 	public boolean checkUpdates = true;
 
+	// More ways to shape the menu (added with the UI rework; older config files simply get these defaults)
+	/** Accent colour that replaces the theme's own, as "RRGGBB". Null = the theme's accent. */
+	public String accent = null;
+	/** Row heights and spacing: 0 auto (tighter on small screens), 1 compact, 2 comfortable. */
+	public int density = 0;
+	/** Corner style: 0 sharp, 1 soft, 2 round. */
+	public int corners = 2;
+	/** Smooth hover fades, sliding highlights and smooth scrolling. Off = everything changes at once. */
+	public boolean animations = true;
+	/** Tooltips when the mouse rests on something. */
+	public boolean tooltips = true;
+	/** Category list on the left: 0 auto (names when there is room), 1 icons only, 2 always with names. */
+	public int sidebar = 0;
+	/** Width of the panel on the right: 0 narrow, 1 normal, 2 wide. */
+	public int panelWidth = 1;
+
 	/** A saved set of choices: what is styled, size changes and particle sizes. */
 	public static final class Profile {
 		public Map<String, String> styles = new TreeMap<>();
@@ -102,6 +118,12 @@ public final class StudioConfig {
 					config.profiles = new java.util.LinkedHashMap<>(config.profiles);
 					config.profiles.values().removeIf(java.util.Objects::isNull);
 					if (config.activeProfile == null || config.activeProfile.isBlank()) config.activeProfile = "Main";
+					config.density = Math.max(0, Math.min(2, config.density));
+					config.corners = Math.max(0, Math.min(2, config.corners));
+					config.sidebar = Math.max(0, Math.min(2, config.sidebar));
+					config.panelWidth = Math.max(0, Math.min(2, config.panelWidth));
+					config.cardSize = Math.max(0, Math.min(2, config.cardSize));
+					config.opacity = Float.isNaN(config.opacity) ? 0.78f : Math.max(0.4f, Math.min(1f, config.opacity));
 					config.storeActive();
 					return config;
 				}
@@ -211,6 +233,22 @@ public final class StudioConfig {
 		Map<String, Map<String, Adjust>> copy = GSON.fromJson(GSON.toJson(from),
 			new com.google.gson.reflect.TypeToken<TreeMap<String, TreeMap<String, Adjust>>>() {}.getType());
 		return copy == null ? new TreeMap<>() : new TreeMap<>(copy);
+	}
+
+	/** Puts the look of the menu back to how it first came: theme, accent, opacity, font, spacing, corners, motion. */
+	public void resetLook() {
+		theme = "PURPLE";
+		accent = null;
+		opacity = 0.78f;
+		font = null;
+		customFont = false;
+		cardSize = 1;
+		density = 0;
+		corners = 2;
+		animations = true;
+		tooltips = true;
+		sidebar = 0;
+		panelWidth = 1;
 	}
 
 	public String fontId() {
