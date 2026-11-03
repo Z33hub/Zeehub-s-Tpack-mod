@@ -160,51 +160,37 @@ public final class StudioScreen extends Screen {
 		restoreView();
 	}
 
-	/** Opens on the category, item and parts the menu was left on last time. */
+	// Where the menu was left, kept while the game runs (a restart opens on Swords again)
+	private static Category lastCategory;
+	private static Item lastItem;
+	private static final Map<Category, TexturePart> lastParts = new HashMap<>();
+
+	/** Opens on the category, item and parts the menu was left on last time (this session). */
 	private void restoreView() {
-		if (config.lastCategory != null) {
-			try {
-				category = Category.valueOf(config.lastCategory);
-			} catch (IllegalArgumentException ignored) {
-				// a category that no longer exists: keep the default
-			}
-		}
-		if (config.lastItem != null) {
-			Identifier id = Identifier.tryParse(config.lastItem);
-			if (id != null && Registries.ITEM.containsId(id)) {
-				Item item = Registries.ITEM.get(id);
-				if (!category.items().contains(item)) {
-					// picked from a search: open the category it belongs to
-					for (Category c : Category.values()) {
-						if (c != Category.ALL && c.items().contains(item)) {
-							category = c;
-							break;
-						}
+		if (lastCategory != null) category = lastCategory;
+		if (lastItem != null) {
+			if (!category.items().contains(lastItem)) {
+				// picked from a search: open the category it belongs to
+				for (Category c : Category.values()) {
+					if (c != Category.ALL && c.items().contains(lastItem)) {
+						category = c;
+						break;
 					}
 				}
-				if (category.items().contains(item)) selected = item;
 			}
+			if (category.items().contains(lastItem)) selected = lastItem;
 		}
-		if (config.lastParts != null) {
-			config.lastParts.forEach((cat, key) -> {
-				TexturePart part = TexturePart.byKey(key);
-				for (Category c : Category.values()) {
-					if (c.name().equals(cat) && part != null && c.parts().contains(part)) selectedPart.put(c, part);
-				}
-			});
-		}
+		selectedPart.putAll(lastParts);
 		revealRail = true;
 		revealTile = true;
 	}
 
-	/** Saves the category, item and parts the menu is on, for next time. */
+	/** Keeps the category, item and parts the menu is on, for the next time it opens. */
 	private void rememberView() {
-		config.lastCategory = category.name();
-		config.lastItem = selected == null ? null : Registries.ITEM.getId(selected).toString();
-		Map<String, String> parts = new java.util.TreeMap<>();
-		selectedPart.forEach((c, part) -> parts.put(c.name(), part.key()));
-		config.lastParts = parts;
-		config.save();
+		lastCategory = category;
+		lastItem = selected;
+		lastParts.clear();
+		lastParts.putAll(selectedPart);
 	}
 
 	// ------------------------------------------------------------------ setup
