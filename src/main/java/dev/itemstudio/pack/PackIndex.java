@@ -318,6 +318,22 @@ public final class PackIndex {
 		return files == null ? List.of() : files;
 	}
 
+	/** The blockstate and block model file of a part's block (see TexturePart.modelBlock). */
+	public static List<String> blockModelFiles(String block) {
+		return List.of("assets/minecraft/blockstates/" + block + ".json", "assets/minecraft/models/block/" + block + ".json");
+	}
+
+	/** The block model files a pack has for a part (cobweb outlines): its blockstate and/or block model. */
+	public List<String> partModelFiles(PackSource source, TexturePart element) {
+		String block = element.modelBlock();
+		if (block == null || source instanceof VanillaSource) return List.of();
+		List<String> list = new ArrayList<>(2);
+		for (String file : blockModelFiles(block)) {
+			if (source.has(file)) list.add(file);
+		}
+		return list;
+	}
+
 	public List<FilePackSource> packsForPart(TexturePart element) {
 		return packsForCache.computeIfAbsent(element.key(), k -> {
 			List<FilePackSource> list = new ArrayList<>();
@@ -343,6 +359,17 @@ public final class PackIndex {
 				if (source.has(file + ".mcmeta")) digest.update(source.read(file + ".mcmeta"));
 				digest.update((byte) 1);
 			}
+			// a cobweb with an outline model doesn't look like the same texture without one
+			for (String file : partModelFiles(source, element)) {
+				digest.update(file.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+				digest.update((byte) 2);
+				digest.update(source.read(file));
+				for (String tex : modelTextureFiles(source, file)) {
+					digest.update(tex.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+					digest.update(source.read(tex));
+				}
+				digest.update((byte) 3);
+			}
 			result = java.util.HexFormat.of().formatHex(digest.digest());
 		} catch (Exception e) {
 			result = "unique:" + source.id();
@@ -360,11 +387,33 @@ public final class PackIndex {
 				for (String file : files) {
 					if (!java.util.Arrays.equals(source.read(file), Resources.readBelow(file))) return false;
 				}
+				for (String file : partModelFiles(source, element)) {
+					if (!java.util.Arrays.equals(source.read(file), Resources.readBelow(file))) return false;
+				}
 				return true;
 			} catch (Exception e) {
 				return false;
 			}
 		});
+	}
+
+	/** Texture files a pack has that a block model file of that pack points to. */
+	private static List<String> modelTextureFiles(PackSource source, String modelFile) {
+		List<String> list = new ArrayList<>();
+		try {
+			com.google.gson.JsonElement json = Resources.parse(source.read(modelFile));
+			if (json == null || !json.isJsonObject() || !json.getAsJsonObject().has("textures")) return list;
+			com.google.gson.JsonElement textures = json.getAsJsonObject().get("textures");
+			if (!textures.isJsonObject()) return list;
+			for (String key : textures.getAsJsonObject().keySet()) {
+				String ref = Refs.textureRef(textures.getAsJsonObject().get(key));
+				if (ref != null && source.has(Refs.textureFile(ref))) list.add(Refs.textureFile(ref));
+			}
+		} catch (Exception ignored) {
+			// unreadable model: only its bytes count
+		}
+		java.util.Collections.sort(list);
+		return list;
 	}
 
 	/** True when no turned-on pack changes this HUD part. */

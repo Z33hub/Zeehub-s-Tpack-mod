@@ -681,7 +681,8 @@ public final class StudioScreen extends Screen {
 	private String kindOf(PackSource p, Target t) {
 		if (t.isPart()) {
 			int n = index.partFiles(p, t.part).size();
-			return n + " texture" + (n == 1 ? "" : "s");
+			String textures = n + " texture" + (n == 1 ? "" : "s");
+			return index.partModelFiles(p, t.part).isEmpty() ? textures : textures + " + model";
 		}
 		PackIndex.Provided provided = index.provided(p, ItemInfo.of(t.item));
 		boolean model = provided.itemDef() || !provided.models().isEmpty() || !provided.parentModels().isEmpty();
