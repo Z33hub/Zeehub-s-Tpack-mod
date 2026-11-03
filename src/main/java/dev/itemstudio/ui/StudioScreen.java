@@ -48,6 +48,9 @@ import java.util.function.Supplier;
  * The Item Studio menu: categories on the left, the items of a category as a row of tiles, a large gallery of
  * style cards, and a preview + size/position panel on the right. Everything except the two search boxes is drawn
  * by hand; each frame registers its clickable areas in {@link #hits}, and clicks are matched against them.
+ *
+ * Look: one spacing scale (2, 4, 6, 8, 12), one corner style picked in the settings, hover fades and a sliding
+ * highlight that are cheap (see {@link Anim}), and small pixel icons (see {@link Icons}).
  */
 public final class StudioScreen extends Screen {
 	// Text colours (the backgrounds come from the theme)
@@ -57,10 +60,7 @@ public final class StudioScreen extends Screen {
 	private static final int WARN = 0xFFF5B83D;
 	private static final int GOOD = 0xFF5BE49B;
 	private static final int GOLD = 0xFFF5B83D;
-
-
-	private static final int HEADER = 24;
-	private static final int FOOTER = 26;
+	private static final int WHITE = 0xFFFFFFFF;
 
 	private enum Filter { ALL, FAVORITES, RECENT }
 
@@ -80,7 +80,17 @@ public final class StudioScreen extends Screen {
 			double t = (mouseX - barX1) / Math.max(1, barX2 - barX1);
 			t = Math.max(0, Math.min(1, t));
 			float raw = (float) (min + t * (max - min));
-			set.accept(Math.round(raw / step) * step);
+			set.accept(clampStep(Math.round(raw / step) * step));
+		}
+
+		/** One step up or down (the little arrows next to a slider). */
+		void nudge(int steps) {
+			float now = get.get();
+			set.accept(clampStep(Math.round((now + steps * step) / step) * step));
+		}
+
+		private float clampStep(float v) {
+			return Math.max(min, Math.min(max, v));
 		}
 	}
 
@@ -100,7 +110,9 @@ public final class StudioScreen extends Screen {
 	private final Map<Item, ItemStack> stacks = new HashMap<>();
 	private final List<Hit> hits = new ArrayList<>();
 	private final List<ScrollArea> scrollAreas = new ArrayList<>();
+	/** Where each scroll area is heading (scroll) and where it is drawn right now (scrollShown). */
 	private final Map<String, Integer> scroll = new HashMap<>();
+	private final Map<String, Float> scrollShown = new HashMap<>();
 	private static final com.google.gson.Gson SNAPSHOT_GSON = new com.google.gson.Gson();
 	private static final java.lang.reflect.Type ADJUST_TYPE =
 		new com.google.gson.reflect.TypeToken<java.util.TreeMap<String, java.util.TreeMap<String, Adjust>>>() {}.getType();
@@ -112,7 +124,12 @@ public final class StudioScreen extends Screen {
 	private final java.util.ArrayDeque<State> history = new java.util.ArrayDeque<>();
 	/** Smooth movement of the highlighted category in the sidebar. */
 	private float railHighlight = Float.NaN;
+	private final Anim anim = new Anim();
 	private long lastFrame = System.nanoTime();
+	/** Seconds the menu has been open, for loading dots and the like. */
+	private float clock;
+	/** Seconds the last frame took (at most 0.1). */
+	private float dt = 0.016f;
 
 	private PackIndex index;
 	private CompletableFuture<PackIndex> loading;
@@ -126,6 +143,11 @@ public final class StudioScreen extends Screen {
 	private Filter filter = Filter.ALL;
 	private boolean bulkMode;
 	private boolean settingsOpen;
+	/** Which page of the settings is showing (0 look, 1 layout, 2 general). Kept while the game runs. */
+	private static int lastSettingsTab;
+	private int settingsTab = lastSettingsTab;
+	/** A key control waiting for the next key press in the settings, or null. */
+	private net.minecraft.client.KeyMapping listening;
 	private String query = "";
 	private String styleQuery = "";
 	private String searchCacheQuery;
@@ -150,14 +172,31 @@ public final class StudioScreen extends Screen {
 	private boolean crossShown, painting, paintOn;
 	private String seedKey, seedPattern;
 	private Theme.Palette pal;
+	/** The mouse button is down on something: its rectangle looks pressed. */
+	private boolean mouseDown;
+	private int pressX1, pressY1, pressX2, pressY2;
+	/** Tooltips wait a moment: this is what the mouse rests on and since when. */
+	private int tipKey;
+	private long tipSince;
 
-	// layout
+	// layout (all recomputed every frame by layout(), so changing a setting shows at once)
 	private int px, py, pw, ph, bodyY, footerY, railW, sideX, sideW, centerX, centerW;
+	private boolean railFull, compact;
+	/** Control height, header and footer heights, panel padding, grid gap, tile and rail row size, preview stage height. */
+	private int ctl, headerH, footerH, pad, gap, tile, railRow, stageH;
+	private String layoutKey = "";
 
 	public StudioScreen(Screen parent) {
 		super(Component.translatable("itemstudio.title"));
 		this.parent = parent;
 		restoreView();
+	}
+
+	/** Opens with the settings panel showing (the Mod Menu button uses this). */
+	public static StudioScreen withSettings(Screen parent) {
+		StudioScreen screen = new StudioScreen(parent);
+		screen.settingsOpen = true;
+		return screen;
 	}
 
 	// Where the menu was left, kept while the game runs (a restart opens on Swords again)
@@ -193,8 +232,6 @@ public final class StudioScreen extends Screen {
 		lastParts.putAll(selectedPart);
 	}
 
-	// ------------------------------------------------------------------ setup
-
 	@Override
 	protected void init() {
 		if (index == null && loading == null) startScan("Loading packs...");
@@ -202,25 +239,14 @@ public final class StudioScreen extends Screen {
 		if (history.isEmpty()) pushHistory();
 		previews.newSession();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
+		layout();
 
-		px = 6;
-		py = 6;
-		pw = width - 12;
-		ph = height - 12;
-		bodyY = py + HEADER;
-		footerY = py + ph - FOOTER;
-		railW = width >= 520 ? 100 : 24;
-		sideW = Math.max(140, Math.min(180, (int) (pw * 0.28)));
-		sideX = px + pw - sideW;
-		centerX = px + railW + 10;
-		centerW = sideX - centerX - 10;
-
-		int searchW = Math.max(70, Math.min(150, pw / 4));
-		search = new EditBox(font, px + pw - searchW - 44, py + 8, searchW - 18, 10, Component.literal("Search all items"));
+		// The text boxes are moved to their place every frame (see placeFields), so these sizes are only a start.
+		search = new EditBox(font, px + pw - 150, py + 8, 100, 10, Component.literal("Search all items"));
 		search.setBordered(false);
 		search.setMaxLength(50);
 		search.setValue(query);
-		search.setHint(styled("Search all items", false).withColor(MUTED));
+		search.setHint(styledIn("Search all items", menuFont(), false).withColor(MUTED));
 		search.setResponder(text -> {
 			query = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("items", 0);
@@ -232,7 +258,7 @@ public final class StudioScreen extends Screen {
 		styleSearch.setBordered(false);
 		styleSearch.setMaxLength(50);
 		styleSearch.setValue(styleQuery);
-		styleSearch.setHint(styled("Search packs", false).withColor(MUTED));
+		styleSearch.setHint(styledIn("Search packs", menuFont(), false).withColor(MUTED));
 		styleSearch.setResponder(text -> {
 			styleQuery = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("cards", 0);
@@ -269,6 +295,45 @@ public final class StudioScreen extends Screen {
 		loading = null;
 	}
 
+	// ------------------------------------------------------------------ layout
+
+	/**
+	 * Works out where everything goes from the screen size and the look settings. Runs every frame (a handful of
+	 * integer sums), so a changed setting shows up at once without reopening the menu.
+	 */
+	private void layout() {
+		// Auto density: tighter when the screen is small (GUI scale 4 on a 1080p screen is only 480x270)
+		compact = config.density == 1 || (config.density == 0 && (height < 300 || width < 500));
+		int margin = width >= 700 && height >= 400 ? 10 : width >= 460 && height >= 260 ? 6 : 4;
+		px = margin;
+		py = margin;
+		pw = width - margin * 2;
+		ph = height - margin * 2;
+		ctl = compact ? 16 : 18;
+		headerH = compact ? 24 : 28;
+		footerH = compact ? 24 : 28;
+		pad = compact ? 8 : 10;
+		gap = compact ? 6 : 8;
+		tile = compact ? 22 : 24;
+		railRow = compact ? 19 : 22;
+		stageH = compact ? 52 : 68;
+		bodyY = py + headerH;
+		footerY = py + ph - footerH;
+		railFull = config.sidebar == 2 || (config.sidebar == 0 && pw >= 500);
+		railW = railFull ? Math.max(100, Math.min(pw >= 780 ? 132 : 124, pw / 6)) : compact ? 26 : 30;
+		int[] low = {128, 142, 168};
+		int[] high = {160, 190, 236};
+		float[] share = {0.24f, 0.28f, 0.34f};
+		int w = Math.max(0, Math.min(2, config.panelWidth));
+		sideW = Math.max(low[w], Math.min(high[w], (int) (pw * share[w])));
+		centerX = px + railW + pad;
+		// never let the middle get squeezed below what the cards and the toolbar need
+		int room = px + pw - sideW - pad - centerX;
+		if (room < 150) sideW = Math.max(112, sideW - (150 - room));
+		sideX = px + pw - sideW;
+		centerW = sideX - centerX - pad;
+	}
+
 	// ------------------------------------------------------------------ text with the menu font
 
 	private final Map<String, FontDescription.Resource> fontCache = new HashMap<>();
@@ -278,6 +343,9 @@ public final class StudioScreen extends Screen {
 	/** Text widths and shortened texts, for the current font. Cleared when the font changes. */
 	private final Map<String, Integer> widthCache = new HashMap<>();
 	private final Map<String, String> trimCache = new HashMap<>();
+	/** Ready-made text objects, so drawing a label doesn't build a new one every frame. */
+	private final Map<String, MutableComponent> plainText = new HashMap<>();
+	private final Map<String, MutableComponent> boldText = new HashMap<>();
 
 	private MenuFont menuFont() {
 		return frameFont != null ? frameFont : MenuFont.byId(config.fontId());
@@ -296,8 +364,15 @@ public final class StudioScreen extends Screen {
 		return Component.literal(s).setStyle(Style.EMPTY.withFont(fontOf(f, bold)));
 	}
 
+	/** Shared text object for the menu font. Never change it (no withColor); build one with styledIn for that. */
 	private MutableComponent styled(String s, boolean bold) {
-		return styledIn(s, menuFont(), bold);
+		Map<String, MutableComponent> cache = bold ? boldText : plainText;
+		MutableComponent t = cache.get(s);
+		if (t == null) {
+			t = styledIn(s, menuFont(), bold);
+			cache.put(s, t);
+		}
+		return t;
 	}
 
 	private int textW(String s) {
@@ -344,9 +419,46 @@ public final class StudioScreen extends Screen {
 		ctx.text(font, styled(s, true), x, y, color, false);
 	}
 
+	/** Text with its right end at x. */
+	private void textRight(GuiGraphicsExtractor ctx, String s, int x, int y, int color) {
+		text(ctx, s, x - textW(s), y, color);
+	}
+
+	/** Text centred between x1 and x2. */
+	private void textCentered(GuiGraphicsExtractor ctx, String s, int x1, int x2, int y, int color) {
+		text(ctx, s, x1 + (x2 - x1 - textW(s)) / 2, y, color);
+	}
+
+	private void boldCentered(GuiGraphicsExtractor ctx, String s, int x1, int x2, int y, int color) {
+		bold(ctx, s, x1 + (x2 - x1 - boldW(s)) / 2, y, color);
+	}
+
 	/** True when the menu uses Minecraft's pixel font (the default). Pixel text is never shrunk: it turns blotchy. */
 	private boolean pixelFont() {
 		return menuFont().pixel();
+	}
+
+	/** Titles are a little bigger than body text with the custom fonts; Minecraft's pixel font stays at its own size. */
+	private float headingScale() {
+		return pixelFont() ? 1f : 1.2f;
+	}
+
+	private void heading(GuiGraphicsExtractor ctx, String s, int x, int y, int color) {
+		float k = headingScale();
+		if (k == 1f) {
+			bold(ctx, s, x, y, color);
+			return;
+		}
+		Matrix3x2fStack m = ctx.pose();
+		m.pushMatrix();
+		m.translate(x, y - 1);
+		m.scale(k, k);
+		ctx.text(font, styled(s, true), 0, 0, color, false);
+		m.popMatrix();
+	}
+
+	private int headingW(String s) {
+		return Math.round(boldW(s) * headingScale());
 	}
 
 	/** Hints and sub-labels: 75% with the custom font, full size with Minecraft's font. */
@@ -396,6 +508,25 @@ public final class StudioScreen extends Screen {
 			y += smallH();
 		}
 		return y;
+	}
+
+	/** How tall smallWrapped would be, without drawing. */
+	private int smallWrappedHeight(String s, int maxW) {
+		int lines = 0;
+		StringBuilder line = new StringBuilder();
+		for (String word : s.split(" ")) {
+			String next = line.length() == 0 ? word : line + " " + word;
+			if (line.length() > 0 && smallW(next) > maxW) {
+				lines++;
+				line.setLength(0);
+				line.append(word);
+			} else {
+				line.setLength(0);
+				line.append(next);
+			}
+		}
+		if (line.length() > 0) lines++;
+		return lines * smallH();
 	}
 
 	/** Short names for the view buttons, used with the wider pixel font. */
@@ -500,6 +631,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void changed(boolean finished) {
+		changeCount++;
 		config.cleanUp();
 		config.save();
 		if (finished) pushHistory();
@@ -835,29 +967,98 @@ public final class StudioScreen extends Screen {
 
 	// ------------------------------------------------------------------ rendering
 
+	private int palKey = Integer.MIN_VALUE;
+	private int accentRgb() {
+		return Theme.parseAccent(config.accent);
+	}
+
+	/** What changed since the last frame decides whether the category dots and tile dots are worked out again. */
+	private int editedSig = Integer.MIN_VALUE;
+	private int changeCount;
+	private final java.util.Set<String> editedKeys = new java.util.HashSet<>();
+	private final boolean[] categoryEdited = new boolean[Category.values().length];
+
+	private void refreshEdited() {
+		int sig = System.identityHashCode(config.styles) * 31 + System.identityHashCode(config.adjust) * 17
+			+ System.identityHashCode(config.partSize) * 7 + changeCount + (config.crosshair == null ? 0 : 1);
+		if (sig == editedSig) return;
+		editedSig = sig;
+		editedKeys.clear();
+		editedKeys.addAll(config.styles.keySet());
+		editedKeys.addAll(config.partSize.keySet());
+		for (Map.Entry<String, Map<String, Adjust>> e : config.adjust.entrySet()) {
+			if (config.hasAdjust(e.getKey())) editedKeys.add(e.getKey());
+		}
+		if (config.crosshair != null) editedKeys.add(dev.itemstudio.pack.HudElement.CROSSHAIR.key());
+		Category[] cats = Category.values();
+		for (int i = 0; i < cats.length; i++) {
+			Category c = cats[i];
+			boolean any = false;
+			if (c == Category.ALL) {
+				any = !editedKeys.isEmpty();
+			} else if (!c.parts().isEmpty()) {
+				for (TexturePart p : c.parts()) {
+					if (editedKeys.contains(p.key())) {
+						any = true;
+						break;
+					}
+				}
+			} else {
+				for (Item item : c.items()) {
+					if (editedKeys.contains(itemTarget(item).key)) {
+						any = true;
+						break;
+					}
+				}
+			}
+			categoryEdited[i] = any;
+		}
+	}
+
+	private boolean isEdited(Target t) {
+		return editedKeys.contains(t.key);
+	}
+
 	@Override
 	public void extractRenderState(GuiGraphicsExtractor ctx, int mouseX, int mouseY, float delta) {
 		hits.clear();
 		scrollAreas.clear();
 		crossShown = false;
 		previews.beginFrame();
+		long now = System.nanoTime();
+		dt = Math.max(0.0005f, Math.min(0.1f, (now - lastFrame) / 1e9f));
+		lastFrame = now;
+		clock += dt;
+		anim.dt = dt;
+		anim.enabled = config.animations;
 		MenuFont font = MenuFont.byId(config.fontId());
-		if (font != frameFont || widthCache.size() > 20000 || trimCache.size() > 20000) {
+		if (font != frameFont || widthCache.size() > 20000 || trimCache.size() > 20000 || plainText.size() > 6000
+			|| boldText.size() > 6000) {
 			widthCache.clear();
 			trimCache.clear();
+			plainText.clear();
+			boldText.clear();
 			frameFont = font;
+			cardLinesFor = null;
+			searchVariant = -1;
+			packVariant = -1;
 		}
-		pal = theme().palette(config.opacity);
+		int key = theme().ordinal() * 1000003 + Float.floatToIntBits(config.opacity) * 31 + (accentRgb() + 7) * 17;
+		if (pal == null || key != palKey) {
+			palKey = key;
+			pal = theme().palette(config.opacity, accentRgb());
+		}
+		layout();
 		int generation = dev.itemstudio.pack.PackIndexCache.generation();
 		if (generation != previewGeneration || previews.size() > 3000) {
 			previews.clear();
 			previewGeneration = generation;
 		}
 		ready();
+		refreshEdited();
 
-		roundRect(ctx, px, py, px + pw, py + ph, pal.panel());
-		outline(ctx, px, py, px + pw, py + ph, pal.panelBorder());
-
+		hoverBlocked = profilesOpen;
+		drawWindow(ctx);
 		drawHeader(ctx, mouseX, mouseY);
 		drawRail(ctx, mouseX, mouseY);
 		styleSearch.visible = false;
@@ -869,149 +1070,279 @@ public final class StudioScreen extends Screen {
 		if (profilesOpen) {
 			// Text boxes are drawn after everything else, so one under the list would show through it.
 			styleSearch.visible = false;
+			hoverBlocked = false;
 			drawProfiles(ctx, mouseX, mouseY);
 		}
 		profileName.visible = profilesOpen && renamingProfile && renameRowShown;
 
 		super.extractRenderState(ctx, mouseX, mouseY, delta); // the search boxes (and the profile name box)
 
-		// Only the top-most thing under the mouse may show a tooltip, so nothing covered (by the profile list,
-		// for example) shows one through it.
-		for (int i = hits.size() - 1; i >= 0; i--) {
-			Hit hit = hits.get(i);
-			if (!hit.contains(mouseX, mouseY)) continue;
-			if (hit.tooltip != null) ctx.setTooltipForNextFrame(Component.literal(hit.tooltip), mouseX, mouseY);
-			break;
-		}
+		drawTooltip(ctx, mouseX, mouseY);
 	}
 
+	/** Only the top-most thing under the mouse may show a tooltip, so nothing covered (by the profile list) shows one. */
+	private void drawTooltip(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
+		int shown = 0;
+		String tip = null;
+		if (config.tooltips && dragging == null && !painting) {
+			for (int i = hits.size() - 1; i >= 0; i--) {
+				Hit hit = hits.get(i);
+				if (!hit.contains(mouseX, mouseY)) continue;
+				tip = hit.tooltip;
+				shown = Anim.key(hit.x1 * 4099 + hit.y1, hit.x2 * 4099 + hit.y2, tip == null ? 0 : tip.hashCode());
+				break;
+			}
+		}
+		if (tip == null) {
+			tipKey = 0;
+			return;
+		}
+		long nowMs = System.currentTimeMillis();
+		if (shown != tipKey) {
+			tipKey = shown;
+			tipSince = nowMs;
+		}
+		// a short wait, so sweeping the mouse across the menu doesn't flash a tooltip on everything
+		if (nowMs - tipSince >= (config.animations ? 350 : 150)) ctx.setTooltipForNextFrame(Component.literal(tip), mouseX, mouseY);
+	}
+
+	/** The window itself: a soft shadow, the panel and its border. */
+	private void drawWindow(GuiGraphicsExtractor ctx) {
+		int[] lg = shapeLg();
+		if (px >= 6) {
+			fill(ctx, px - 1, py + 2, px, py + ph - 2, 0x30000000);
+			fill(ctx, px + pw, py + 2, px + pw + 1, py + ph - 2, 0x30000000);
+			fill(ctx, px + 2, py - 1, px + pw - 2, py, 0x30000000);
+			fill(ctx, px + 2, py + ph, px + pw - 2, py + ph + 1, 0x30000000);
+			fill(ctx, px - 2, py + 4, px - 1, py + ph - 3, 0x18000000);
+			fill(ctx, px + pw + 1, py + 4, px + pw + 2, py + ph - 3, 0x18000000);
+			fill(ctx, px + 4, py - 2, px + pw - 3, py - 1, 0x18000000);
+			fill(ctx, px + 4, py + ph + 1, px + pw - 3, py + ph + 2, 0x18000000);
+		}
+		box(ctx, px, py, px + pw, py + ph, pal.panel(), pal.panelBorder(), lg);
+	}
+
+	private int placeholderFor(int width) {
+		return width >= 100 ? 0 : width >= 70 ? 1 : 2;
+	}
+
+	private int searchVariant = -1, packVariant = -1;
+	private static final String[] ALL_PLACEHOLDERS = {"Search all items", "Search items", "Search"};
+	private static final String[] PACK_PLACEHOLDERS = {"Search packs", "Search", "Find"};
+
 	private void drawHeader(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
-		int x = px + 8, y = py + 5;
-		roundRect(ctx, x, y - 1, x + 18, y + 17, pal.strong());
-		ctx.fakeItem(stack(Items.DIAMOND_SWORD), x + 1, y);
-		bold(ctx, "Item Studio", x + 24, py + 8, TEXT);
+		bandTop(ctx, px, py, px + pw, bodyY, pal.header(), shapeLg());
+		fill(ctx, px + 1, bodyY - 1, px + pw - 1, bodyY, pal.line());
+		int cy = py + (headerH - ctl) / 2;
+		int textY = py + (headerH - 8) / 2;
+		int x = px + 8;
+
+		// logo
+		int ls = compact ? 18 : 20;
+		int ly = py + (headerH - ls) / 2;
+		round(ctx, x, ly, x + ls, ly + ls, pal.strong(), shapeSm());
+		fill(ctx, x + 2, ly + 1, x + ls - 2, ly + 2, 0x26FFFFFF);
+		ctx.fakeItem(stack(Items.DIAMOND_SWORD), x + (ls - 16) / 2, ly + (ls - 16) / 2);
+		x += ls + 7;
+		String title = "Item Studio";
+		if (pw >= 380) {
+			heading(ctx, title, x, textY, TEXT);
+			x += headingW(title) + 10;
+		}
+
+		// the right end first, so the middle knows how much room it has: close, settings, search
+		int rx = px + pw - 8;
+		int closeX = rx - ctl;
+		rx = closeX - 4;
+		int gearX = rx - ctl;
+		rx = gearX - 8;
+		int sw = Math.max(compact ? 84 : 96, Math.min(176, pw / 4));
+		int sx2 = rx, sx1 = rx - sw;
 
 		// profile switcher
-		int chipX = x + 30 + boldW("Item Studio");
-		String profile = trim(config.activeProfile, 90);
-		int chipW = textW(profile) + 22;
-		boolean chipHover = inside(mouseX, mouseY, chipX, py + 4, chipX + chipW, py + 20);
-		roundRect(ctx, chipX, py + 4, chipX + chipW, py + 20, profilesOpen ? pal.soft() : chipHover ? pal.surfaceHover() : pal.surface());
-		outline(ctx, chipX, py + 4, chipX + chipW, py + 20, profilesOpen ? pal.accent() : pal.surfaceBorder());
-		text(ctx, profile, chipX + 7, py + 8, TEXT);
-		int caret = chipX + chipW - 11;
-		fill(ctx, caret, py + 11, caret + 5, py + 12, MUTED);
-		fill(ctx, caret + 1, py + 12, caret + 4, py + 13, MUTED);
-		fill(ctx, caret + 2, py + 13, caret + 3, py + 14, MUTED);
+		String profile = trim(config.activeProfile, compact ? 64 : 84);
+		int chipW = 8 + 5 + 5 + textW(profile) + 6 + 5 + 7;
+		int chipX = x;
+		boolean chipHover = hot(mouseX, mouseY, chipX, cy, chipX + chipW, cy + ctl);
+		float ct = anim.fade(Anim.key(0x7001, 0), chipHover, 16f);
+		box(ctx, chipX, cy, chipX + chipW, cy + ctl,
+			profilesOpen ? pal.soft() : Anim.mix(pal.surface(), pal.surfaceHover(), ct),
+			profilesOpen ? pal.accent() : Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ct), shapeSm());
+		icon(ctx, Icons.DOT, chipX + 8, cy + (ctl - 5) / 2, pal.accent());
+		text(ctx, profile, chipX + 8 + 5 + 5, textY, TEXT);
+		icon(ctx, Icons.CARET_DOWN, chipX + chipW - 7 - 5, cy + (ctl - 3) / 2, profilesOpen ? pal.accentText() : MUTED);
 		profileChipX = chipX;
-		hits.add(new Hit(chipX, py + 4, chipX + chipW, py + 20, () -> {
+		hits.add(new Hit(chipX, cy, chipX + chipW, cy + ctl, () -> {
 			if (renamingProfile) commitRename();
 			profilesOpen = !profilesOpen;
 			if (profilesOpen) styleSearch.setFocused(false);
 		}, null, profilesOpen ? null : "Profiles: save and switch whole setups", null));
 
+		// breadcrumb: Category > Item
 		int crumbX = chipX + chipW + 8;
-		fill(ctx, crumbX, py + 7, crumbX + 1, py + 17, pal.line2());
-		String where = !query.isEmpty() ? "Search" : category.label;
-		Target shownTarget = current();
-		String item = shownTarget == null ? "" : nameOf(shownTarget);
-		int roomEnd = search.getX() - 12;
+		int roomEnd = sx1 - 8;
 		dev.itemstudio.UpdateCheck.Update update = dev.itemstudio.UpdateCheck.found();
-		if (update != null && search.getX() - 16 - 6 - (textW("Update " + update.version()) + 12) > crumbX + 8) {
+		if (update != null) {
 			String label = "Update " + update.version();
-			int uw = textW(label) + 12;
-			int ux = search.getX() - 16 - 6 - uw;
-			boolean uh = inside(mouseX, mouseY, ux, py + 4, ux + uw, py + 20);
-			roundRect(ctx, ux, py + 4, ux + uw, py + 20, uh ? pal.strongHover() : pal.strong());
-			text(ctx, label, ux + 6, py + 8, 0xFFFFFFFF);
-			hits.add(new Hit(ux, py + 4, ux + uw, py + 20, () -> {
-				java.net.URI releasePage = java.net.URI.create(update.url());
-				Util.getPlatform().openUri(releasePage);
-			}, null, "Item Studio " + update.version() + " is out (you have " + dev.itemstudio.UpdateCheck.currentVersion()
-				+ "). MouseButtonEvent to open the download page.", null));
-			roomEnd = ux - 8;
+			int uw = 6 + 5 + 4 + textW(label) + 7;
+			int ux = sx1 - 6 - uw;
+			if (ux > crumbX + 8) {
+				boolean uh = hot(mouseX, mouseY, ux, cy, ux + uw, cy + ctl);
+				float ut = anim.fade(Anim.key(0x7002, 0), uh, 16f);
+				round(ctx, ux, cy, ux + uw, cy + ctl, Anim.mix(pal.strong(), pal.strongHover(), ut), shapeSm());
+				icon(ctx, Icons.DOT, ux + 6, cy + (ctl - 5) / 2, 0xFFFFFFFF);
+				text(ctx, label, ux + 6 + 5 + 4, textY, WHITE);
+				hits.add(new Hit(ux, cy, ux + uw, cy + ctl, () -> {
+					java.net.URI releasePage = java.net.URI.create(update.url());
+					Util.getPlatform().openUri(releasePage);
+				}, null, "Item Studio " + update.version() + " is out (you have " + dev.itemstudio.UpdateCheck.currentVersion()
+					+ "). MouseButtonEvent to open the download page.", null));
+				roomEnd = ux - 8;
+			}
 		}
-		if (roomEnd - crumbX > 60) {
-			String crumb = trim(where + "  /  " + item, roomEnd - crumbX - 8);
-			text(ctx, crumb, crumbX + 8, py + 8, MUTED);
+		if (roomEnd - crumbX > 56) {
+			fill(ctx, crumbX, cy + 3, crumbX + 1, cy + ctl - 3, pal.line2());
+			crumbX += 8;
+			String where = !query.isEmpty() ? "Search" : category.label;
+			Target shownTarget = current();
+			String item = shownTarget == null ? "" : nameOf(shownTarget);
+			int room = roomEnd - crumbX;
+			if (room >= 130 || item.isEmpty()) {
+				// Category > Item
+				String whereShown = trim(where, Math.max(24, room / 2 - 6));
+				text(ctx, whereShown, crumbX, textY, MUTED);
+				int cx = crumbX + textW(whereShown) + 5;
+				if (!item.isEmpty() && roomEnd - cx > 22) {
+					icon(ctx, Icons.CHEVRON_RIGHT, cx, cy + (ctl - 7) / 2, MUTED);
+					cx += Icons.CHEVRON_RIGHT.w + 5;
+					text(ctx, trim(item, roomEnd - cx), cx, textY, TEXT2);
+				}
+			} else {
+				// not much room: just what is picked
+				text(ctx, trim(item, room), crumbX, textY, TEXT2);
+			}
 		}
 
-		// search box frame
-		int sx1 = search.getX() - 16, sy1 = py + 4, sx2 = search.getX() + search.getWidth() + 4, sy2 = py + 20;
-		roundRect(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? pal.surfaceHover() : pal.surface());
-		outline(ctx, sx1, sy1, sx2, sy2, search.isFocused() ? pal.accent() : pal.surfaceBorder());
-		drawSearchIcon(ctx, sx1 + 5, sy1 + 4, MUTED);
+		// search box
+		boolean focused = search.isFocused();
+		boolean sh = hot(mouseX, mouseY, sx1, cy, sx2, cy + ctl);
+		inputFrame(ctx, sx1, cy, sx2, cy + ctl, focused, sh, 0x7010);
+		icon(ctx, Icons.SEARCH, sx1 + 6, cy + (ctl - 8) / 2, focused ? pal.accentText() : MUTED);
+		int clearW = query.isEmpty() ? 0 : 14;
+		int variant = placeholderFor(sw - 19 - 6 - clearW);
+		if (variant != searchVariant) {
+			search.setHint(styledIn(ALL_PLACEHOLDERS[variant], menuFont(), false).withColor(MUTED));
+			searchVariant = variant;
+		}
+		search.setX(sx1 + 19);
+		search.setY(cy + (ctl - 8) / 2);
+		search.setWidth(sw - 19 - 6 - clearW);
+		if (query.isEmpty() && !focused && sw >= 120) {
+			small(ctx, "Ctrl F", sx2 - smallW("Ctrl F") - 6, cy + (ctl - smallH()) / 2 + (pixelFont() ? 0 : 1), 0x55FFFFFF);
+		}
+		if (!query.isEmpty()) {
+			int clx = sx2 - 6 - Icons.CLOSE.w;
+			boolean clh = inside(mouseX, mouseY, clx - 3, cy, sx2, cy + ctl);
+			icon(ctx, Icons.CLOSE, clx, cy + (ctl - 7) / 2, clh ? WHITE : MUTED);
+			hits.add(new Hit(clx - 3, cy, sx2, cy + ctl, () -> search.setValue(""), null, "Clear the search", null));
+		}
 
 		// settings and close
-		int gx = px + pw - 40, cx = px + pw - 21;
-		iconButton(ctx, gx, py + 4, settingsOpen ? "Close settings" : "Settings: theme, opacity, font", mouseX, mouseY,
-			settingsOpen, () -> settingsOpen = !settingsOpen);
-		drawGear(ctx, gx + 4, py + 8, settingsOpen ? 0xFFFFFFFF : TEXT2);
-		iconButton(ctx, cx, py + 4, "Close (changes are applied)", mouseX, mouseY, false, this::onClose);
-		drawCross(ctx, cx + 5, py + 9, TEXT2);
-
-		fill(ctx, px + 1, bodyY - 1, px + pw - 1, bodyY, pal.line());
+		iconButton(ctx, gearX, cy, ctl, Icons.GEAR, settingsOpen, mouseX, mouseY, () -> settingsOpen = !settingsOpen,
+			settingsOpen ? "Close settings" : "Settings: look, layout and keys");
+		iconButton(ctx, closeX, cy, ctl, Icons.CLOSE, false, mouseX, mouseY, this::onClose, "Close (changes are applied)");
 	}
+
+	private static String[] countText;
+	private final int[] railYs = new int[Category.values().length];
 
 	private void drawRail(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x1 = px + 1, y1 = bodyY, x2 = px + railW, y2 = footerY;
 		fill(ctx, x1, y1, x2, y2, pal.rail());
 		fill(ctx, x2, y1, x2 + 1, y2, pal.line());
 		Category[] cats = Category.values();
-		int rowH = 20;
-		int top = y1 + 6;
-		if (railW > 40) {
-			small(ctx, "CATEGORIES", x1 + 10, top, MUTED);
-			top += 10;
+		if (countText == null) {
+			countText = new String[cats.length];
+			for (int i = 0; i < cats.length; i++) {
+				Category c = cats[i];
+				countText[i] = c == Category.ALL ? "" : String.valueOf(c.parts().isEmpty() ? c.items().size() : c.parts().size());
+			}
 		}
-		int content = cats.length * (rowH + 1);
+		int top = y1 + 6;
+		int step = railRow + 2;
+		int sectionGap = 8;
+		// where each row goes, with a caption (wide rail) or a line (icon rail) between the groups
+		int cursor = 0;
+		for (int i = 0; i < cats.length; i++) {
+			Category c = cats[i];
+			if (c == Category.SWORDS && railFull) cursor += smallH() + 4;
+			if (c == Category.BLOCKS || c == Category.ALL) cursor += railFull && c == Category.BLOCKS ? sectionGap + smallH() + 2 : sectionGap;
+			railYs[i] = cursor;
+			cursor += step;
+		}
+		int content = cursor;
+		int view = y2 - top - 4;
 		if (revealRail) {
 			// first frame: centre the restored category if the list has to scroll
-			scroll.put("rail", Math.max(0, category.ordinal() * (rowH + 1) - (y2 - top - 4) / 2 + rowH / 2));
+			jumpScroll("rail", Math.max(0, railYs[category.ordinal()] - view / 2 + railRow / 2));
 			revealRail = false;
 		}
-		int off = scrollOf("rail", content, y2 - top - 4);
-		scrollAreas.add(new ScrollArea("rail", x1, top, x2, y2, Math.max(0, content - (y2 - top - 4))));
+		int off = scrollOf("rail", content, view);
+		scrollAreas.add(new ScrollArea("rail", x1, top, x2, y2, Math.max(0, content - view)));
 
 		ctx.enableScissor(x1, top, x2, y2);
-		int y = top - off;
-		// the highlight slides to the chosen category instead of jumping
-		long now = System.nanoTime();
-		float dt = Math.min(0.1f, (now - lastFrame) / 1e9f);
-		lastFrame = now;
+		int bx1 = x1 + 5, bx2 = x2 - 5;
 		if (query.isEmpty()) {
-			int target = top - off + category.ordinal() * (rowH + 1);
-			if (Float.isNaN(railHighlight) || Math.abs(target - railHighlight) > 400) railHighlight = target;
-			else railHighlight += (target - railHighlight) * Math.min(1f, dt * 18f);
-			int hy = Math.round(railHighlight);
-			roundRect(ctx, x1 + 5, hy, x2 - 5, hy + rowH, pal.soft());
-			fill(ctx, x1 + 5, hy + 4, x1 + 6, hy + rowH - 4, pal.accent());
+			// the highlight slides to the chosen category instead of jumping
+			float hc = anim.to(Anim.key(0x7100, 0), railYs[category.ordinal()], 16f);
+			int hy = top - off + Math.round(hc);
+			round(ctx, bx1, hy, bx2, hy + railRow, pal.soft(), shapeSm());
+			round(ctx, bx1 + 2, hy + 4, bx1 + 4, hy + railRow - 4, pal.accent(), CORNERS_1);
 		}
-		for (Category cat : cats) {
+		for (int i = 0; i < cats.length; i++) {
+			Category cat = cats[i];
+			int y = top - off + railYs[i];
+			if (railFull && (cat == Category.SWORDS || cat == Category.BLOCKS)) {
+				small(ctx, cat == Category.SWORDS ? "ITEMS" : "TEXTURES", x1 + 10, y - smallH() - 3, MUTED);
+			}
+			if ((cat == Category.BLOCKS && !railFull) || cat == Category.ALL) {
+				fill(ctx, bx1 + 2, y - sectionGap / 2 - 1, bx2 - 2, y - sectionGap / 2, pal.line());
+			}
+			if (y + railRow < top || y > y2) continue;
 			boolean active = cat == category && query.isEmpty();
-			boolean hover = inside(mouseX, mouseY, x1, Math.max(y, top), x2, Math.min(y + rowH, y2));
-			int bx1 = x1 + 5, bx2 = x2 - 5;
-			if (!active && hover) roundRect(ctx, bx1, y, bx2, y + rowH, pal.surface());
-			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), bx1 + 2, y + 2, 16);
-			if (railW > 40) {
-				String count = cat == Category.ALL ? "" : String.valueOf(cat.parts().isEmpty() ? cat.items().size() : cat.parts().size());
+			boolean hover = hot(mouseX, mouseY, x1, Math.max(y, top), x2, Math.min(y + railRow, y2));
+			float t = anim.fade(Anim.key(0x7101, i), hover && !active, 16f);
+			if (t > 0.01f) round(ctx, bx1, y, bx2, y + railRow, Anim.mix(0, pal.surface(), t), shapeSm());
+			int iconX = railFull ? bx1 + 5 : x1 + (railW - 1 - 16) / 2;
+			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), iconX, y + (railRow - 16) / 2, 16);
+			boolean edited = categoryEdited[i] && cat != Category.ALL;
+			if (railFull) {
+				String count = countText[i];
 				int countW = smallW(count);
-				text(ctx, trim(cat.label, bx2 - bx1 - 27 - countW), bx1 + 21, y + 6, active ? 0xFFFFFFFF : TEXT2);
-				small(ctx, count, bx2 - 4 - countW, y + 6, active ? pal.accentText() : MUTED);
+				int right = bx2 - 5;
+				if (edited) {
+					icon(ctx, Icons.DOT, right - countW - (countW > 0 ? 3 : 0) - 5, y + (railRow - 5) / 2, pal.accent());
+				}
+				int labelX = iconX + 16 + 5;
+				int labelMax = bx2 - 5 - countW - (edited ? 12 : 4) - labelX;
+				text(ctx, trim(cat.label, labelMax), labelX, y + (railRow - 8) / 2, active ? WHITE : Anim.mix(TEXT2, WHITE, t));
+				if (countW > 0) small(ctx, count, right - countW, y + (railRow - smallH()) / 2 + (pixelFont() ? 0 : 1), active ? pal.accentText() : MUTED);
+			} else if (edited) {
+				icon(ctx, Icons.DOT, bx2 - 4, y + 2, pal.accent());
 			}
 			final Category target = cat;
-			addHit(bx1, y, bx2, y + rowH, top, y2, () -> {
+			addHit(bx1, y, bx2, y + railRow, top, y2, () -> {
 				category = target;
 				query = "";
 				search.setValue("");
 				bulkMode = false;
-				scroll.put("items", 0);
-				scroll.put("cards", 0);
+				resetScroll("items");
+				resetScroll("cards");
 				if (!target.items().isEmpty()) selected = target.items().get(0);
-			}, railW > 40 ? null : cat.label);
-			y += rowH + 1;
+			}, railFull ? null : cat.label);
 		}
 		ctx.disableScissor();
+		scrollBar(ctx, x2, top, y2, off, Math.max(0, content - view), false);
 	}
 
 	private void drawCenter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
@@ -1019,37 +1350,51 @@ public final class StudioScreen extends Screen {
 		Target cur = current();
 		boolean searching = !query.isEmpty();
 		int x = centerX, w = centerW;
-		int y = bodyY + 8;
+		int y = bodyY + (compact ? 6 : 10);
 
-		// title row
+		// title row: the category, how many things are in it, and the "one pack for all" switch
 		String title = searching ? "Search" : category.label;
-		bold(ctx, title, x, y + 3, TEXT);
-		text(ctx, items.size() + (partMode() ? " part" : " item") + (items.size() == 1 ? "" : "s"), x + boldW(title) + 6, y + 3, MUTED);
+		int rowH = ctl;
+		heading(ctx, title, x, y + (rowH - 8) / 2, TEXT);
+		String count = items.size() + (partMode() ? " part" : " item") + (items.size() == 1 ? "" : "s");
+		int titleW = headingW(title);
+		int bw = 0;
+		String bulkLabel = null;
 		if (!searching && category != Category.ALL) {
-			String label = bulkMode ? "Back to " + (cur == null ? "item" : trim(nameOf(cur), 60))
-				: "One pack for all";
-			int bw = textW(label) + 14;
-			button(ctx, x + w - bw, y, bw, 15, label, bulkMode, false, mouseX, mouseY, () -> {
+			bulkLabel = bulkMode ? "Back to " + (cur == null ? "item" : trim(nameOf(cur), 56)) : "One pack for all";
+			bw = buttonW(bulkLabel, null) + 4;
+			// narrow middle: a shorter name for the same button
+			if (titleW + 12 + bw > w) {
+				bulkLabel = bulkMode ? "Back" : "For all";
+				bw = buttonW(bulkLabel, null) + 4;
+			}
+		}
+		if (titleW + 8 + textW(count) + 8 + 12 + bw < w) {
+			badge(ctx, count, x + titleW + 8, y + (rowH - 12) / 2, 12, pal.surface(), MUTED);
+		}
+		if (bulkLabel != null) {
+			button(ctx, x + w - bw, y, bw, rowH, bulkLabel, null, bulkMode ? BTN_SOFT : BTN_NORMAL, mouseX, mouseY, () -> {
 				bulkMode = !bulkMode;
-				scroll.put("cards", 0);
+				resetScroll("cards");
 			}, bulkMode ? null : "Use one pack for every " + category.label.toLowerCase(Locale.ROOT) + " item it has");
 		}
-		y += 20;
+		y += rowH + (compact ? 5 : 7);
 
 		// item tiles: up to 2 rows, scrolls when there are more
-		int tile = 22, gap = 4;
-		int cols = Math.max(1, (w + gap) / (tile + gap));
+		int tgap = 4;
+		int cols = Math.max(1, (w + tgap) / (tile + tgap));
 		int rows = Math.max(1, (items.size() + cols - 1) / cols);
-		int shownRows = Math.min(rows, 2);
-		int areaH = shownRows * (tile + gap) - gap;
-		int content = rows * (tile + gap) - gap;
+		int maxRows = footerY - bodyY >= 180 ? 2 : 1;
+		int shownRows = Math.min(rows, maxRows);
+		int areaH = shownRows * (tile + tgap) - tgap;
+		int content = rows * (tile + tgap) - tgap;
 		if (revealTile) {
 			// first frame: if the restored item is below the visible rows, scroll down to it
 			if (cur != null && !searching) {
 				for (int i = 0; i < items.size(); i++) {
 					if (items.get(i).key.equals(cur.key)) {
 						int row = i / cols;
-						if (row >= shownRows) scroll.put("items", (row - shownRows + 1) * (tile + gap));
+						if (row >= shownRows) jumpScroll("items", (row - shownRows + 1) * (tile + tgap));
 						break;
 					}
 				}
@@ -1062,76 +1407,113 @@ public final class StudioScreen extends Screen {
 			text(ctx, "Nothing matches", x, y + 6, MUTED);
 		} else {
 			ctx.enableScissor(x, y, x + w, y + areaH);
+			int[] sm = shapeSm();
 			for (int i = 0; i < items.size(); i++) {
-				int tx = x + (i % cols) * (tile + gap);
-				int ty = y + (i / cols) * (tile + gap) - off;
+				int tx = x + (i % cols) * (tile + tgap);
+				int ty = y + (i / cols) * (tile + tgap) - off;
 				if (ty + tile < y || ty > y + areaH) continue;
 				Target t = items.get(i);
 				boolean isSelected = cur != null && t.key.equals(cur.key);
-				boolean hover = inside(mouseX, mouseY, tx, Math.max(ty, y), tx + tile, Math.min(ty + tile, y + areaH));
-				roundRect(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-				outline(ctx, tx, ty, tx + tile, ty + tile, isSelected ? pal.accent() : pal.surfaceBorder());
-				drawTargetIcon(ctx, t, tx + 3, ty + 3, 16);
-				String id = t.key;
-				if (config.styles.containsKey(id) || config.hasAdjust(id) || config.partSize.containsKey(id)
-					|| (config.crosshair != null && id.equals(dev.itemstudio.pack.HudElement.CROSSHAIR.key()))) {
-					fill(ctx, tx + tile - 5, ty + 2, tx + tile - 2, ty + 5, pal.accent());
+				boolean hover = hot(mouseX, mouseY, tx, Math.max(ty, y), tx + tile, Math.min(ty + tile, y + areaH));
+				float ht = anim.fade(Anim.key(0x7200, i), hover && !isSelected, 16f);
+				float st = anim.fade(Anim.key(0x7201, i), isSelected, 16f);
+				if (ht < 0.02f && st < 0.02f) {
+					round(ctx, tx, ty, tx + tile, ty + tile, pal.surface(), sm);
+				} else {
+					int fillColor = Anim.mix(Anim.mix(pal.surface(), pal.surfaceHover(), ht), pal.soft(), st);
+					int borderColor = Anim.mix(Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ht), pal.accent(), st);
+					box(ctx, tx, ty, tx + tile, ty + tile, fillColor, borderColor, sm);
 				}
+				drawTargetIcon(ctx, t, tx + (tile - 16) / 2, ty + (tile - 16) / 2, 16);
+				if (isEdited(t)) round(ctx, tx + tile - 6, ty + 2, tx + tile - 2, ty + 6, pal.accent(), CORNERS_1);
 				addHit(tx, ty, tx + tile, ty + tile, y, y + areaH, () -> {
 					if (t.isPart()) selectedPart.put(category, t.part);
 					else selected = t.item;
 					bulkMode = false;
 					settingsOpen = false;
-					scroll.put("cards", 0);
-					scroll.put("side", 0);
+					resetScroll("cards");
+					resetScroll("side");
 				}, nameOf(t));
 			}
 			ctx.disableScissor();
+			scrollBar(ctx, x + w + 4, y, y + areaH, off, Math.max(0, content - areaH), false);
 		}
-		y += areaH + 8;
+		y += areaH + (compact ? 6 : 8);
 
 		// toolbar: pack search, filter, sort
-		int sortW = textW(config.sortZtoA ? "Name Z-A" : "Name A-Z") + 14;
+		int h = ctl;
 		String[] filterNames = {"All", "Favorites", "Recent"};
-		int segW = 6;
-		for (String f : filterNames) segW += textW(f) + 12;
-		int searchW = Math.max(60, w - sortW - segW - 12);
-		int sx1 = x, sx2 = x + searchW;
-		roundRect(ctx, sx1, y, sx2, y + 16, styleSearch.isFocused() ? pal.surfaceHover() : pal.surface());
-		outline(ctx, sx1, y, sx2, y + 16, styleSearch.isFocused() ? pal.accent() : pal.surfaceBorder());
-		drawSearchIcon(ctx, sx1 + 5, y + 4, MUTED);
-		styleSearch.visible = true;
-		styleSearch.setX(sx1 + 16);
-		styleSearch.setY(y + 4);
-		styleSearch.setWidth(searchW - 20);
-
-		int fx = sx2 + 6;
-		roundRect(ctx, fx, y, fx + segW, y + 16, pal.surface());
-		outline(ctx, fx, y, fx + segW, y + 16, pal.surfaceBorder());
-		int cx = fx + 3;
-		for (int i = 0; i < filterNames.length; i++) {
-			String f = filterNames[i];
-			int fw = textW(f) + 10;
-			boolean on = filter.ordinal() == i;
-			boolean hover = inside(mouseX, mouseY, cx, y + 2, cx + fw, y + 14);
-			if (on) roundRect(ctx, cx, y + 2, cx + fw, y + 14, pal.soft());
-			else if (hover) roundRect(ctx, cx, y + 2, cx + fw, y + 14, pal.surface());
-			text(ctx, f, cx + 5, y + 4, on ? 0xFFFFFFFF : MUTED);
-			final Filter target = Filter.values()[i];
-			hits.add(new Hit(cx, y + 2, cx + fw, y + 14, () -> {
-				filter = target;
-				scroll.put("cards", 0);
-			}, null, null, null));
-			cx += fw + 2;
+		Icons[] filterIcons = {null, Icons.STAR, Icons.CLOCK};
+		boolean zToA = config.sortZtoA;
+		String sortFull = zToA ? "Name Z-A" : "Name A-Z";
+		String sortShort = zToA ? "Z-A" : "A-Z";
+		int fullSeg = 4, tightSeg = 4;
+		int[] fullW = new int[3], tightW = new int[3];
+		for (int i = 0; i < 3; i++) {
+			fullW[i] = textW(filterNames[i]) + (filterIcons[i] == null ? 0 : filterIcons[i].w + 3) + 12;
+			tightW[i] = i == 0 ? textW(filterNames[0]) + 12 : filterIcons[i].w + 12;
+			fullSeg += fullW[i];
+			tightSeg += tightW[i];
 		}
-		button(ctx, x + w - sortW, y, sortW, 16, config.sortZtoA ? "Name Z-A" : "Name A-Z", false, false, mouseX, mouseY, () -> {
-			config.sortZtoA = !config.sortZtoA;
-			config.save();
-		}, "Change the order of the packs");
-		y += 22;
+		int sortFullW = buttonW(sortFull, Icons.SORT_UP);
+		int sortTightW = buttonW(sortShort, Icons.SORT_UP);
+		int smallGap = 6;
+		boolean tight = w - fullSeg - sortFullW - 2 * smallGap < 96;
+		boolean tighter = tight && w - tightSeg - sortTightW - 2 * smallGap < 60;
+		int segW = tight ? tightSeg : fullSeg;
+		int sortW = tight ? sortTightW : sortFullW;
+		int searchW = Math.max(40, w - segW - sortW - 2 * smallGap);
+		if (tighter) {
+			// very narrow: the search box gets the room, the filter and sort shrink to the bare minimum
+			segW = tightSeg;
+			sortW = Math.max(h, Icons.SORT_UP.w + 10);
+			searchW = Math.max(40, w - segW - sortW - 2 * smallGap);
+		}
+		int sx1 = x, sx2 = x + searchW;
+		boolean sfocus = styleSearch.isFocused();
+		inputFrame(ctx, sx1, y, sx2, y + h, sfocus, hot(mouseX, mouseY, sx1, y, sx2, y + h), 0x7020);
+		icon(ctx, Icons.SEARCH, sx1 + 6, y + (h - 8) / 2, sfocus ? pal.accentText() : MUTED);
+		int clearW = styleQuery.isEmpty() ? 0 : 14;
+		int fieldW = searchW - 19 - 6 - clearW;
+		int variant = placeholderFor(fieldW);
+		if (variant != packVariant) {
+			styleSearch.setHint(styledIn(PACK_PLACEHOLDERS[variant], menuFont(), false).withColor(MUTED));
+			packVariant = variant;
+		}
+		styleSearch.visible = true;
+		styleSearch.setX(sx1 + 19);
+		styleSearch.setY(y + (h - 8) / 2);
+		styleSearch.setWidth(fieldW);
+		if (!styleQuery.isEmpty()) {
+			int clx = sx2 - 6 - Icons.CLOSE.w;
+			boolean clh = inside(mouseX, mouseY, clx - 3, y, sx2, y + h);
+			icon(ctx, Icons.CLOSE, clx, y + (h - 7) / 2, clh ? WHITE : MUTED);
+			hits.add(new Hit(clx - 3, y, sx2, y + h, () -> styleSearch.setValue(""), null, "Clear the search", null));
+		}
+
+		int fx = sx2 + smallGap;
+		String[] labels = new String[3];
+		Icons[] icons = new Icons[3];
+		int[] widths = tight ? tightW : fullW;
+		for (int i = 0; i < 3; i++) {
+			labels[i] = tight && i > 0 ? null : filterNames[i];
+			icons[i] = filterIcons[i];
+		}
+		String[] tips = {"Every pack", "Only the packs you starred (right-click a card to star it)", "The packs you used last"};
+		segmented(ctx, 0x7030, fx, y, segW, h, labels, icons, widths, filter.ordinal(), mouseX, mouseY, i -> {
+			filter = Filter.values()[i];
+			resetScroll("cards");
+		}, tips);
+		button(ctx, x + w - sortW, y, sortW, h, tighter ? null : tight ? sortShort : sortFull, zToA ? Icons.SORT_DOWN : Icons.SORT_UP,
+			BTN_NORMAL, mouseX, mouseY, () -> {
+				config.sortZtoA = !config.sortZtoA;
+				config.save();
+			}, "Change the order of the packs (" + sortFull + ")");
+		y += h + (compact ? 6 : 8);
 
 		if (!ready()) {
 			text(ctx, "Loading packs...", x, y + 4, MUTED);
+			drawLoading(ctx, x + textW("Loading packs...") + 12, y + 7);
 			return;
 		}
 		if (bulkMode && !searching && category != Category.ALL) {
@@ -1214,12 +1596,12 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void drawCards(GuiGraphicsExtractor ctx, Target t, int x, int top, int w, int bottom, int mouseX, int mouseY) {
-		String main = mainFile(t);
 		String current = styleOf(t.key);
 		List<FilePackSource> packs = packsFor(t);
 		if (packs.size() > 4 && !warmed(t.key, List.of(t))) {
-			text(ctx, "Comparing " + packs.size() + " packs...", x, top + 4, MUTED);
-			drawLoading(ctx, x + textW("Comparing " + packs.size() + " packs...") + 12, top + 7);
+			String message = "Comparing " + packs.size() + " packs...";
+			text(ctx, message, x, top + 4, MUTED);
+			drawLoading(ctx, x + textW(message) + 12, top + 7);
 			return;
 		}
 		String cacheKey = t.key + "|" + current + "|" + styleQuery + "|" + filter + "|" + config.sortZtoA + "|"
@@ -1233,6 +1615,117 @@ public final class StudioScreen extends Screen {
 			cardsCache = cards;
 		}
 		drawCardGrid(ctx, t, cards, packs, current, x, top, w, bottom, mouseX, mouseY);
+	}
+
+	private static final int[] MIN_CARD_COMPACT = {44, 54, 76};
+	private static final int[] MIN_CARD_COMFY = {56, 70, 96};
+	/** Card names cut to the card width, made once per list and width instead of every frame. */
+	private List<Card> cardLinesFor;
+	private int cardLinesW, cardLinesN;
+	private String[][] cardLines;
+	private String[] cardSubs;
+
+	private void drawCardGrid(GuiGraphicsExtractor ctx, Target t, List<Card> cards, List<FilePackSource> packs, String current,
+	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
+		int cgap = gap;
+		int minCard = (compact ? MIN_CARD_COMPACT : MIN_CARD_COMFY)[Math.max(0, Math.min(2, config.cardSize))];
+		int cols = Math.max(2, (w + cgap) / (minCard + cgap));
+		int cardW = (w - cgap * (cols - 1)) / cols;
+		int cp = compact ? 4 : 5;
+		int prev = cardW - cp * 2;
+		// on small screens the picture box is a little shorter than wide, so more cards fit
+		int wellH = compact ? Math.max(24, prev * 3 / 4) : prev;
+		int nameLines = cardW >= 48 ? 2 : 1;
+		int cardH = cp + wellH + 4 + nameLines * 10 + smallH() + cp;
+		int rows = (cards.size() + cols - 1) / cols;
+		boolean worn = !t.isPart() && ItemInfo.of(t.item).hasWornLook();
+		int hintH = cards.isEmpty() || packs.isEmpty() ? 28 : worn ? 14 : 0;
+		int content = rows * (cardH + cgap) + hintH;
+		int off = scrollOf("cards", content, bottom - top);
+		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
+
+		if (cards != cardLinesFor || cardW != cardLinesW || nameLines != cardLinesN) {
+			cardLinesFor = cards;
+			cardLinesW = cardW;
+			cardLinesN = nameLines;
+			cardLines = new String[cards.size()][];
+			cardSubs = new String[cards.size()];
+			for (int i = 0; i < cards.size(); i++) {
+				Card c = cards.get(i);
+				cardLines[i] = nameLines == 2 ? twoLines(c.name, cardW - cp * 2) : new String[]{trim(c.name, cardW - cp * 2), ""};
+				cardSubs[i] = smallTrim(c.sub, cardW - cp * 2);
+			}
+		}
+
+		int[] lg = shapeLg();
+		int[] sm = shapeSm();
+		ctx.enableScissor(x - 2, top, x + w + 2, bottom);
+		for (int i = 0; i < cards.size(); i++) {
+			Card card = cards.get(i);
+			int cx = x + (i % cols) * (cardW + cgap);
+			int cy = top + (i / cols) * (cardH + cgap) - off;
+			if (cy + cardH + 2 < top || cy > bottom) continue;
+			boolean on = current == null ? card.sourceId == null : card.ids.contains(current);
+			int hy1 = Math.max(cy, top), hy2 = Math.min(cy + cardH, bottom);
+			boolean hover = hot(mouseX, mouseY, cx, hy1, cx + cardW, hy2);
+			boolean down = pressed(cx, hy1, cx + cardW, hy2);
+			float ht = anim.fade(Anim.key(0x7300, i), hover && !on, 16f);
+			float st = anim.fade(Anim.key(0x7301, i), on, 14f);
+			int lift = ht > 0.5f && !down ? 1 : 0;
+			int y0 = cy - lift;
+			if (lift == 1) dropShadow(ctx, cx, y0 + cardH, cx + cardW, y0 + cardH, 0x50);
+			int fillColor = down ? pal.surfacePressed() : Anim.mix(Anim.mix(pal.surface(), pal.surfaceHover(), ht), pal.cardOn(), st);
+			int borderColor = Anim.mix(Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ht), pal.accent(), st);
+			box(ctx, cx, y0, cx + cardW, y0 + cardH, fillColor, borderColor, lg);
+			if (st > 0.5f) box(ctx, cx - 1, y0 - 1, cx + cardW + 1, y0 + cardH + 1, 0, pal.glow(), lg);
+			round(ctx, cx + cp, y0 + cp, cx + cp + prev, y0 + cp + wellH, pal.well(), sm);
+			int img = Math.min(prev, wellH) - 8;
+			int imgX = cx + cp + (prev - img) / 2, imgY = y0 + cp + (wellH - img) / 2;
+			if (!drawPreview(ctx, card.imageKey, card.image, imgX, imgY, img)) {
+				if (previews.isLoading(card.imageKey)) drawLoading(ctx, cx + cp + prev / 2, y0 + cp + wellH / 2);
+				else drawTargetIcon(ctx, t, imgX, imgY, img);
+			}
+			// name on up to two lines, then the kind of change
+			String[] lines = cardLines[i];
+			int ny = y0 + cp + wellH + 4;
+			text(ctx, lines[0], cx + cp, ny, on ? WHITE : TEXT);
+			if (!lines[1].isEmpty()) text(ctx, lines[1], cx + cp, ny + 10, on ? WHITE : TEXT);
+			small(ctx, cardSubs[i], cx + cp, ny + (lines[1].isEmpty() ? 10 : 20), on ? pal.accentText() : MUTED);
+
+			boolean fav = card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && isFavorite(card.ids);
+			if (on) {
+				round(ctx, cx + cardW - cp - 14, y0 + cp + 3, cx + cardW - cp - 3, y0 + cp + 14, pal.strong(), shapePill(11));
+				icon(ctx, Icons.CHECK, cx + cardW - cp - 14 + 2, y0 + cp + 3 + 3, WHITE);
+			}
+			final List<String> ids = card.ids;
+			final String sourceId = card.sourceId;
+			final boolean alreadyOn = on;
+			Runnable favToggle = () -> toggleFavorite(ids);
+			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
+				if (alreadyOn) return;
+				setStyle(t.key, sourceId);
+				changed(true);
+			}, favToggle, card.tooltip);
+			if (card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && (fav || hover)) {
+				int sx = cx + cp + 3, sy = y0 + cp + 3;
+				boolean starHover = inside(mouseX, mouseY, sx - 2, sy - 2, sx + 11, sy + 11);
+				icon(ctx, fav ? Icons.STAR : Icons.STAR_OUTLINE, sx, sy, fav ? GOLD : starHover ? WHITE : 0xB0FFFFFF);
+				addHit(sx - 2, sy - 2, sx + 11, sy + 11, top, bottom, favToggle, favToggle,
+					fav ? "Remove from favorites" : "Add to favorites");
+			}
+		}
+		int hy = top + rows * (cardH + cgap) - off + 2;
+		if (cards.isEmpty()) {
+			text(ctx, styleQuery.isEmpty() ? "No packs here yet." : "No packs match \"" + styleQuery + "\"", x, hy, MUTED);
+			if (filter == Filter.FAVORITES) small(ctx, "Right-click a style card to add it to favorites.", x, hy + 12, MUTED);
+		} else if (packs.isEmpty()) {
+			text(ctx, "None of your packs change this.", x, hy, MUTED);
+			small(ctx, "Add packs to your resourcepacks folder and press Rescan.", x, hy + 12, MUTED);
+		} else if (worn) {
+			small(ctx, "Packs here also change how it looks when worn or used.", x, hy, MUTED);
+		}
+		ctx.disableScissor();
+		scrollBar(ctx, x + w + 6, top, bottom, off, Math.max(0, content - (bottom - top)), false);
 	}
 
 	private List<Card> buildCards(Target t, String current, List<FilePackSource> packs) {
@@ -1271,85 +1764,6 @@ public final class StudioScreen extends Screen {
 				() -> previewOf(preview, t), shown.id() + "|" + t.key));
 		}
 		return cards;
-	}
-
-	private void drawCardGrid(GuiGraphicsExtractor ctx, Target t, List<Card> cards, List<FilePackSource> packs, String current,
-	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
-		int gap = 6;
-		int minCard = config.cardSize <= 0 ? 46 : config.cardSize >= 2 ? 80 : 58;
-		int cols = Math.max(2, (w + gap) / (minCard + gap));
-		int cardW = (w - gap * (cols - 1)) / cols;
-		int prev = cardW - 8;
-		int cardH = 4 + prev + 4 + 20 + smallH() + 1;
-		int rows = (cards.size() + cols - 1) / cols;
-		boolean worn = !t.isPart() && ItemInfo.of(t.item).hasWornLook();
-		int hintH = cards.isEmpty() || packs.isEmpty() ? 26 : worn ? 12 : 0;
-		int content = rows * (cardH + gap) + hintH;
-		int off = scrollOf("cards", content, bottom - top);
-		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
-
-		ctx.enableScissor(x, top, x + w, bottom);
-		for (int i = 0; i < cards.size(); i++) {
-			Card card = cards.get(i);
-			int cx = x + (i % cols) * (cardW + gap);
-			int cy = top + (i / cols) * (cardH + gap) - off;
-			if (cy + cardH < top || cy > bottom) continue;
-			boolean on = current == null ? card.sourceId == null : card.ids.contains(current);
-			boolean hover = inside(mouseX, mouseY, cx, Math.max(cy, top), cx + cardW, Math.min(cy + cardH, bottom));
-			if (hover && !on) {
-				// lift the card a little, with a soft shadow under it
-				fill(ctx, cx + 2, cy + cardH - 1, cx + cardW - 2, cy + cardH + 1, 0x40000000);
-				cy -= 1;
-			}
-			roundRect(ctx, cx, cy, cx + cardW, cy + cardH, on ? pal.cardOn() : hover ? pal.surfaceHover() : pal.surface());
-			if (on) {
-				outline(ctx, cx, cy, cx + cardW, cy + cardH, pal.accent());
-				outline(ctx, cx + 1, cy + 1, cx + cardW - 1, cy + cardH - 1, pal.accent());
-			}
-			roundRect(ctx, cx + 4, cy + 4, cx + 4 + prev, cy + 4 + prev, pal.well());
-			int img = prev - 10;
-			if (!drawPreview(ctx, card.imageKey, card.image, cx + 9, cy + 9, img)) {
-				if (previews.isLoading(card.imageKey)) drawLoading(ctx, cx + 4 + prev / 2, cy + 4 + prev / 2);
-				else drawTargetIcon(ctx, t, cx + 9, cy + 9, img);
-			}
-			// name on up to two lines, then the kind of change
-			String[] lines = twoLines(card.name, cardW - 8);
-			int ny = cy + 4 + prev + 4;
-			text(ctx, lines[0], cx + 4, ny, TEXT);
-			if (!lines[1].isEmpty()) text(ctx, lines[1], cx + 4, ny + 10, TEXT);
-			small(ctx, smallTrim(card.sub, cardW - 8), cx + 4, ny + (lines[1].isEmpty() ? 10 : 20), MUTED);
-
-			boolean fav = card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && isFavorite(card.ids);
-			if (on) {
-				roundRect(ctx, cx + cardW - 15, cy + 6, cx + cardW - 6, cy + 15, pal.strong());
-				drawCheck(ctx, cx + cardW - 13, cy + 8, 0xFFFFFFFF);
-			}
-			final List<String> ids = card.ids;
-			final String sourceId = card.sourceId;
-			final boolean alreadyOn = on;
-			Runnable favToggle = () -> toggleFavorite(ids);
-			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
-				if (alreadyOn) return;
-				setStyle(t.key, sourceId);
-				changed(true);
-			}, favToggle, card.tooltip);
-			if (card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && (fav || hover)) {
-				drawStar(ctx, cx + 7, cy + 7, fav ? GOLD : 0x99FFFFFF);
-				addHit(cx + 5, cy + 5, cx + 15, cy + 15, top, bottom, favToggle, favToggle,
-					fav ? "Remove from favorites" : "Add to favorites");
-			}
-		}
-		int hy = top + rows * (cardH + gap) - off + 2;
-		if (cards.isEmpty()) {
-			text(ctx, styleQuery.isEmpty() ? "No packs here yet." : "No packs match \"" + styleQuery + "\"", x, hy, MUTED);
-			if (filter == Filter.FAVORITES) small(ctx, "Right-click a style card to add it to favorites.", x, hy + 11, MUTED);
-		} else if (packs.isEmpty()) {
-			text(ctx, "None of your packs change this.", x, hy, MUTED);
-			small(ctx, "Add packs to your resourcepacks folder and press Rescan.", x, hy + 11, MUTED);
-		} else if (worn) {
-			small(ctx, "Packs here also change how it looks when worn or used.", x, hy, MUTED);
-		}
-		ctx.disableScissor();
 	}
 
 	/** Splits a name into two lines that fit, ending the second with "..." if needed. */
@@ -1423,30 +1837,35 @@ public final class StudioScreen extends Screen {
 
 	private void drawBulkRows(GuiGraphicsExtractor ctx, List<Target> items, List<List<FilePackSource>> rows, Map<String, int[]> counts,
 	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
-		int rowH = 34, gap = 5;
-		int content = rows.size() * (rowH + gap) + 22;
+		int rowH = compact ? 32 : 36, rgap = compact ? 4 : 5;
+		int headH = ctl + 6;
+		int content = rows.size() * (rowH + rgap) + headH;
 		int off = scrollOf("cards", content, bottom - top);
 		scrollAreas.add(new ScrollArea("cards", x, top, x + w, bottom, Math.max(0, content - (bottom - top))));
 
-		ctx.enableScissor(x, top, x + w, bottom);
+		ctx.enableScissor(x - 2, top, x + w + 2, bottom);
 		int y = top - off;
+		int[] lg = shapeLg();
+		int[] sm = shapeSm();
 		// reset row
 		boolean anyStyled = items.stream().anyMatch(t -> styleOf(t.key) != null);
 		String reset = "Reset all " + category.label.toLowerCase(Locale.ROOT) + " to Default";
+		int bh = ctl - 2;
 		if (anyStyled) {
-			int rw = textW(reset) + 14;
-			if (y + 15 > top && y < bottom) {
-				button(ctx, x + w - rw, y, rw, 15, reset, false, false, mouseX, mouseY, () -> useForCategory(null), null);
+			int rw = buttonW(reset, Icons.RESET);
+			if (y + bh > top && y < bottom) {
+				button(ctx, x + w - rw, y, rw, bh, reset, Icons.RESET, BTN_NORMAL, mouseX, mouseY, () -> useForCategory(null), null);
 			}
 		}
-		small(ctx, "Faded tiles = that pack doesn't change this item.", x, y + 5, MUTED);
-		y += 22;
+		small(ctx, smallTrim("Faded tiles = that pack doesn't change this item.", w - (anyStyled ? buttonW(reset, Icons.RESET) + 8 : 0)),
+			x, y + (bh - smallH()) / 2 + (pixelFont() ? 0 : 1), MUTED);
+		y += headH;
 
-		int tile = 20;
-		int buttonW = 74;
+		int tile = compact ? 18 : 20;
+		int buttonW = compact ? 66 : 74;
 		for (List<FilePackSource> group : rows) {
 			if (y + rowH < top || y > bottom) {
-				y += rowH + gap;
+				y += rowH + rgap;
 				continue;
 			}
 			FilePackSource pack = group.get(0);
@@ -1461,35 +1880,34 @@ public final class StudioScreen extends Screen {
 					}
 				}
 			}
-			roundRect(ctx, x, y, x + w, y + rowH, inUse ? pal.cardOn() : pal.surface());
-			if (inUse) outline(ctx, x, y, x + w, y + rowH, pal.accent());
+			box(ctx, x, y, x + w, y + rowH, inUse ? pal.cardOn() : pal.surface(), inUse ? pal.accent() : pal.surfaceBorder(), lg);
 
 			int nameW = Math.max(70, w / 3);
-			bold(ctx, trim(pack.displayName() + (group.size() > 1 ? " +" + (group.size() - 1) : ""), nameW - 10), x + 8, y + 7, TEXT);
+			bold(ctx, trim(pack.displayName() + (group.size() > 1 ? " +" + (group.size() - 1) : ""), nameW - 12), x + 8, y + (rowH - 19) / 2, TEXT);
 			String sub = (inUse ? "In use - " : "") + "Changes " + count + " of " + items.size();
-			small(ctx, smallTrim(sub, nameW - 10), x + 8, y + 19, inUse ? pal.accentText() : MUTED);
+			small(ctx, smallTrim(sub, nameW - 12), x + 8, y + (rowH - 19) / 2 + 11, inUse ? pal.accentText() : MUTED);
 
 			int tx = x + nameW;
-			int tilesEnd = x + w - buttonW - 10;
+			int tilesEnd = x + w - buttonW - 12;
 			int fit = Math.max(0, (tilesEnd - tx + 3) / (tile + 3));
+			int ty = y + (rowH - tile) / 2;
 			for (int k = 0; k < items.size() && k < fit; k++) {
 				Target t = items.get(k);
 				boolean has = provides(pack, t);
-				int ty = y + 7;
 				int ox = tx + k * (tile + 3);
 				if (k == fit - 1 && items.size() > fit) {
-					roundRect(ctx, ox, ty, ox + tile, ty + tile, pal.surface());
+					round(ctx, ox, ty, ox + tile, ty + tile, pal.surface(), sm);
 					String more = "+" + (items.size() - fit + 1);
-					small(ctx, more, ox + (tile - smallW(more)) / 2, ty + 7, MUTED);
+					small(ctx, more, ox + (tile - smallW(more)) / 2, ty + (tile - smallH()) / 2 + (pixelFont() ? 0 : 1), MUTED);
 					break;
 				}
-				roundRect(ctx, ox, ty, ox + tile, ty + tile, has ? pal.well() : pal.surface());
+				round(ctx, ox, ty, ox + tile, ty + tile, has ? pal.well() : pal.surface(), sm);
 				if (has) {
-					if (!drawPreview(ctx, pack.id() + "|" + t.key, () -> previewOf(pack, t), ox + 2, ty + 2, tile - 4)) {
-						drawTargetIcon(ctx, t, ox + 2, ty + 2, 16);
+					if (!drawPreview(ctx, pack.id() + "|" + t.key, () -> previewOf(pack, t), ox + (tile - 16) / 2, ty + (tile - 16) / 2, 16)) {
+						drawTargetIcon(ctx, t, ox + (tile - 16) / 2, ty + (tile - 16) / 2, 16);
 					}
 				} else {
-					drawTargetIcon(ctx, t, ox + 2, ty + 2, 16);
+					drawTargetIcon(ctx, t, ox + (tile - 16) / 2, ty + (tile - 16) / 2, 16);
 					fill(ctx, ox, ty, ox + tile, ty + tile, 0x99000000 | (theme().base & 0xFFFFFF));
 				}
 				addHit(ox, ty, ox + tile, ty + tile, top, bottom, null, null,
@@ -1497,18 +1915,146 @@ public final class StudioScreen extends Screen {
 			}
 
 			String label = inUse ? "In use" : "Use for " + count;
-			if (y + 9 >= top && y + 25 <= bottom) {
-				button(ctx, x + w - buttonW - 6, y + 9, buttonW, 16, label, !inUse, inUse, mouseX, mouseY,
-					inUse ? () -> { } : () -> useForCategory(pack.id()),
+			int by = y + (rowH - bh) / 2;
+			if (by >= top && by + bh <= bottom) {
+				button(ctx, x + w - buttonW - 8, by, buttonW, bh, label, inUse ? Icons.CHECK : null, inUse ? BTN_SOFT : BTN_PRIMARY,
+					mouseX, mouseY, inUse ? () -> { } : () -> useForCategory(pack.id()),
 					inUse ? null : "Use " + pack.displayName() + " for the " + count + " item(s) it changes");
 			}
-			y += rowH + gap;
+			y += rowH + rgap;
 		}
 		if (rows.isEmpty()) {
 			text(ctx, styleQuery.isEmpty() ? "None of your packs change items in this group." : "No packs match \"" + styleQuery + "\"",
 				x, y + 2, MUTED);
 		}
 		ctx.disableScissor();
+		scrollBar(ctx, x + w + 6, top, bottom, off, Math.max(0, content - (bottom - top)), false);
+	}
+
+	/** Height one slider row takes. */
+	private int sliderStep() {
+		return compact ? 22 : 25;
+	}
+
+	/**
+	 * A labelled slider: name on the left, value on the right (click it to put the value back), a track you can drag
+	 * and small arrows that move it one step. Right-click the track to reset it too. Returns the y below the row.
+	 */
+	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
+	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
+	                   float displayMul) {
+		float value = get.get();
+		boolean changedValue = Math.abs(value - def) > 1e-4f;
+		boolean settingsSlider = label.equals("Opacity");
+		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
+			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
+		boolean beingDragged = dragging != null && dragging.label.equals(label);
+
+		// label and value
+		text(ctx, trim(label, barX2 - barX1 - textW(shown) - 14), barX1, y, changedValue ? TEXT : TEXT2);
+		int vw = textW(shown);
+		if (changedValue) {
+			int rx1 = barX2 - vw - Icons.RESET.w - 8, rx2 = barX2 + 2;
+			boolean rh = hot(mouseX, mouseY, rx1, y - 2, rx2, y + 10);
+			float rt = anim.fade(fadeKey(label, barX1) + 3, rh, 16f);
+			round(ctx, rx1, y - 2, rx2, y + 10, Anim.mix(0, pal.soft(), rt), shapeSm());
+			icon(ctx, Icons.RESET, rx1 + 3, y + 0, Anim.mix(pal.accentText(), WHITE, rt));
+			text(ctx, shown, barX2 - vw, y, Anim.mix(pal.accentText(), WHITE, rt));
+			hits.add(new Hit(rx1, y - 2, rx2, y + 10, () -> {
+				set.accept(def);
+				if (settingsSlider) config.save();
+				else changed(true);
+			}, null, "Put it back to " + (displayMul != 1f ? Math.round(def * displayMul) + unit
+				: (step >= 1f ? String.valueOf(Math.round(def)) : String.format(Locale.ROOT, "%.2f", def)) + unit), null));
+		} else {
+			text(ctx, shown, barX2 - vw, y, MUTED);
+		}
+
+		// track with arrows at both ends
+		int cy = y + 16;
+		int arrow = 10;
+		int tx1 = barX1 + arrow + 3, tx2 = barX2 - arrow - 3;
+		float t = (value - min) / (max - min);
+		float t0 = (def - min) / (max - min);
+		int kx = tx1 + Math.round(t * (tx2 - tx1));
+		int zx = tx1 + Math.round(t0 * (tx2 - tx1));
+		boolean hover = inside(mouseX, mouseY, tx1 - 4, cy - 6, tx2 + 4, cy + 6) && (dragging == null || beingDragged);
+		float gt = anim.fade(fadeKey(label, barX1) + 5, hover || beingDragged, 16f);
+		round(ctx, tx1, cy - 2, tx2, cy + 2, pal.track(), shapePill(4));
+		if (kx != zx) round(ctx, Math.min(kx, zx), cy - 2, Math.max(kx, zx), cy + 2, pal.accent(), CORNERS_1);
+		if (t0 > 0.02f && t0 < 0.98f) fill(ctx, zx, cy - 4, zx + 1, cy + 4, kx == zx ? 0x00000000 : 0x66FFFFFF);
+		if (gt > 0.02f) round(ctx, kx - 6, cy - 6, kx + 6, cy + 6, Anim.mix(0, pal.glow(), gt), shapePill(12));
+		round(ctx, kx - 4, cy - 4, kx + 4, cy + 4, beingDragged ? pal.accentText() : WHITE, shapePill(8));
+
+		Slider slider = new Slider(label, min, max, step, def, get, set, tx1, tx2);
+		hits.add(new Hit(tx1 - 4, cy - 7, tx2 + 4, cy + 7, null, null, null, slider));
+		// arrows
+		for (int dir = -1; dir <= 1; dir += 2) {
+			int ax1 = dir < 0 ? barX1 : barX2 - arrow;
+			boolean atEnd = dir < 0 ? value <= min + 1e-4f : value >= max - 1e-4f;
+			boolean ah = hot(mouseX, mouseY, ax1, cy - 7, ax1 + arrow, cy + 7) && !atEnd;
+			float at = anim.fade(fadeKey(label, barX1) + (dir < 0 ? 11 : 13), ah, 16f);
+			Icons ai = dir < 0 ? Icons.CHEVRON_LEFT : Icons.CHEVRON_RIGHT;
+			if (at > 0.02f) round(ctx, ax1, cy - 7, ax1 + arrow, cy + 7, Anim.mix(0, pal.surfaceHover(), at), shapeSm());
+			icon(ctx, ai, ax1 + (arrow - ai.w) / 2, cy - 3, atEnd ? 0x33FFFFFF : Anim.mix(MUTED, WHITE, at));
+			final int d = dir;
+			if (!atEnd) {
+				hits.add(new Hit(ax1, cy - 7, ax1 + arrow, cy + 7, () -> {
+					slider.nudge(d);
+					if (!settingsSlider) changed(true);
+				}, null, d < 0 ? "A little less" : "A little more", null));
+			}
+		}
+		return y + sliderStep();
+	}
+
+	/** Small caption above a group of sliders. */
+	private int caption(GuiGraphicsExtractor ctx, String s, int x, int y) {
+		small(ctx, s.toUpperCase(Locale.ROOT), x, y, MUTED);
+		return y + smallH() + 3;
+	}
+
+	/** A section line with a link on its right that does something (Reset). Returns the y below it. */
+	private int sectionAction(GuiGraphicsExtractor ctx, String title, String action, boolean enabled, int x1, int x2, int y,
+	                          int mouseX, int mouseY, Runnable run, String tooltip) {
+		String caps = title.toUpperCase(Locale.ROOT);
+		small(ctx, caps, x1, y, MUTED);
+		int tx = x1 + smallW(caps) + 5;
+		// when the title and the link don't both fit, the link is just its icon
+		boolean iconOnly = smallW(caps) + 8 + smallW(action) + Icons.RESET.w + 4 > x2 - x1;
+		int aw = iconOnly ? Icons.RESET.w : smallW(action) + (enabled ? Icons.RESET.w + 4 : 0);
+		int ax = x2 - aw;
+		if (ax - 5 > tx) fill(ctx, tx, y + smallH() / 2 - 1, ax - 5, y + smallH() / 2, pal.line());
+		if (enabled) {
+			boolean h = hot(mouseX, mouseY, ax - 3, y - 3, x2 + 2, y + smallH() + 3);
+			float t = anim.fade(fadeKey(action, x1) + 1, h, 16f);
+			int c = Anim.mix(pal.accentText(), WHITE, t);
+			icon(ctx, Icons.RESET, ax, y + (smallH() - Icons.RESET.h) / 2 + (pixelFont() ? 0 : 1), c);
+			if (!iconOnly) small(ctx, action, ax + Icons.RESET.w + 4, y, c);
+			hits.add(new Hit(ax - 3, y - 3, x2 + 2, y + smallH() + 3, run, null, tooltip, null));
+		} else if (iconOnly) {
+			icon(ctx, Icons.RESET, ax, y + (smallH() - Icons.RESET.h) / 2 + (pixelFont() ? 0 : 1), 0x44FFFFFF);
+		} else {
+			small(ctx, action, ax, y, 0x55FFFFFF);
+		}
+		return y + smallH() + 5;
+	}
+
+	/** The picture box at the top of the side panel. Returns the y below it. */
+	private int drawStage(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, Target t, boolean edited, boolean pictureDrawn) {
+		int[] lg = shapeLg();
+		box(ctx, ix1, y, ix2, y + stageH, pal.well(), pal.line(), lg);
+		// a faint floor line gives the item something to stand on
+		fill(ctx, ix1 + 8, y + stageH - 14, ix2 - 8, y + stageH - 13, 0x0DFFFFFF);
+		small(ctx, "PREVIEW", ix1 + 6, y + stageH - smallH() - 3, 0x66FFFFFF);
+		if (edited) {
+			String s = "Edited";
+			int bw = smallW(s) + 14;
+			round(ctx, ix2 - bw - 4, y + 4, ix2 - 4, y + 4 + smallH() + 3, pal.soft(), shapePill(smallH() + 3));
+			icon(ctx, Icons.DOT, ix2 - bw, y + 4 + (smallH() + 3 - 5) / 2, pal.accent());
+			small(ctx, s, ix2 - bw + 8, y + 5 + (pixelFont() ? 0 : 0), pal.accentText());
+		}
+		return y + stageH + (compact ? 6 : 8);
 	}
 
 	private void drawSide(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
@@ -1521,84 +2067,82 @@ public final class StudioScreen extends Screen {
 			return;
 		}
 		if (selected == null) {
-			text(ctx, "Pick an item", x1 + 10, top + 10, MUTED);
+			text(ctx, "Pick an item", x1 + pad, top + pad, MUTED);
 			return;
 		}
 		ItemInfo info = ItemInfo.of(selected);
-		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
+		int ix1 = x1 + pad, ix2 = x2 - pad, iw = ix2 - ix1;
 
-		int content = 400;
-		int off = scrollOf("side", content, bottom - top);
+		int off = scrollOf("side", sideContent, bottom - top);
 		ctx.enableScissor(x1, top, x2, bottom);
 		int firstHit = hits.size();
-		int y = top + 8 - off;
+		int y = top + pad - off;
+		String itemId = info.id;
+		Target selectedTarget = itemTarget(selected);
 
 		// preview stage: the chosen style's texture, big
-		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
-		outline(ctx, ix1, y, ix2, y + 56, pal.line());
 		String style = ready() ? styleOf(selected) : null;
+		int stageY = y;
+		y = drawStage(ctx, ix1, ix2, y, selectedTarget, isEdited(selectedTarget), false);
+		int picture = Math.min(stageH - 14, 56);
+		int picX = ix1 + (iw - picture) / 2, picY = stageY + (stageH - 12 - picture) / 2;
 		boolean drawn = false;
 		if (ready() && style != null && index.get(style) != null) {
 			PackSource src = index.get(style);
-			Target shownItem = itemTarget(selected);
-			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, shownItem), ix1 + iw / 2 - 20, y + 8, 40);
+			drawn = drawPreview(ctx, src.id() + "|" + info.id, () -> previewOf(src, selectedTarget), picX, picY, picture);
 		}
-		if (!drawn) drawTargetIcon(ctx, itemTarget(selected), ix1 + iw / 2 - 20, y + 8, 40);
-		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
-		y += 62;
+		if (!drawn) drawTargetIcon(ctx, selectedTarget, picX, picY, picture);
 
-		bold(ctx, trim(stack(selected).getHoverName().getString(), iw), ix1, y, TEXT);
-		y += 11;
+		heading(ctx, trim(stack(selected).getHoverName().getString(), iw), ix1, y, TEXT);
+		y += 12;
 		small(ctx, smallTrim(info.id, iw), ix1, y, MUTED);
-		y += smallH();
+		y += smallH() + 3;
 		text(ctx, "Style", ix1, y + 2, MUTED);
 		String styleName = style == null ? "Default" : index != null && index.get(style) != null ? index.get(style).displayName() : style + " (missing)";
-		int chipX = ix1 + textW("Style") + 6;
-		String chip = trim(styleName, ix2 - chipX - 10);
-		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
-		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
-		y += 18;
-		fill(ctx, ix1, y, ix2, y + 1, pal.line());
-		y += 7;
+		int chipX = ix1 + textW("Style") + 7;
+		String chip = trim(styleName, ix2 - chipX - 12);
+		round(ctx, chipX, y, chipX + textW(chip) + 10, y + 13, style == null ? pal.surface() : pal.soft(), shapeSm());
+		text(ctx, chip, chipX + 5, y + 3, style == null ? TEXT2 : pal.accentText());
+		y += 19;
 
-		bold(ctx, "Size & position", ix1, y, TEXT);
-		String resetLabel = "Reset";
-		int rw = textW(resetLabel);
-		boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
-		text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
-		String itemId = info.id;
-		hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
-			Adjust a = config.getAdjust(itemId, view);
-			if (a != null && !a.isDefault()) {
-				a.reset();
-				changed(true);
-			}
-		}, null, "Reset this view", null));
-		y += 14;
-
-		// view buttons, 3 per row ("While blocking" only for shields)
+		// which view the sliders change
 		List<View> views = new ArrayList<>(List.of(View.values()));
 		if (!info.hasBlockingModel()) views.remove(View.BLOCKING);
 		if (!views.contains(view)) view = View.FIRST_PERSON;
+		int editedViews = 0;
+		for (View v : views) {
+			Adjust adj = config.getAdjust(itemId, v);
+			if (adj != null && !adj.isDefault()) editedViews++;
+		}
+		y = section(ctx, "View", editedViews > 0 ? editedViews + " edited" : null, ix1, ix2, y);
 		int vgap = 3;
 		int vw = (iw - vgap * 2) / 3;
+		int vh = compact ? 14 : 16;
 		for (int i = 0; i < views.size(); i++) {
 			View v = views.get(i);
 			int vx = ix1 + (i % 3) * (vw + vgap);
-			int vy = y + (i / 3) * 16;
+			int vy = y + (i / 3) * (vh + vgap);
 			boolean on = v == view;
 			Adjust adj = config.getAdjust(itemId, v);
 			boolean edited = adj != null && !adj.isDefault();
-			boolean hover = inside(mouseX, mouseY, vx, vy, vx + vw, vy + 13);
-			roundRect(ctx, vx, vy, vx + vw, vy + 13, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
-			if (!on) outline(ctx, vx, vy, vx + vw, vy + 13, pal.surfaceBorder());
-			String l = smallTrim(pixelFont() ? shortLabel(v) : v.label, vw - 4);
-			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + (pixelFont() ? 3 : 4), on ? 0xFFFFFFFF : edited ? pal.accentText() : TEXT2);
+			boolean hover = hot(mouseX, mouseY, vx, vy, vx + vw, vy + vh);
+			boolean down = pressed(vx, vy, vx + vw, vy + vh);
+			float ht = anim.fade(Anim.key(0x7400, v.ordinal()), hover && !on, 16f);
+			float st = anim.fade(Anim.key(0x7401, v.ordinal()), on, 16f);
+			int bg = down ? pal.strongPressed() : Anim.mix(Anim.mix(pal.surface(), pal.surfaceHover(), ht), pal.strong(), st);
+			int border = Anim.mix(Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ht), 0, st);
+			box(ctx, vx, vy, vx + vw, vy + vh, bg, border, shapeSm());
+			String l = pixelFont() ? shortLabel(v) : v.label;
+			if (smallW(l) > vw - 6) l = shortLabel(v);
+			l = smallTrim(l, vw - 4);
+			small(ctx, l, vx + (vw - smallW(l)) / 2, vy + (vh - smallH()) / 2 + (pixelFont() ? 0 : 1) + (down ? 1 : 0),
+				on ? WHITE : edited ? pal.accentText() : Anim.mix(TEXT2, WHITE, ht));
+			if (edited) round(ctx, vx + vw - 5, vy + 2, vx + vw - 2, vy + 5, on ? WHITE : pal.accent(), CORNERS_NONE);
 			final View target = v;
-			hits.add(new Hit(vx, vy, vx + vw, vy + 13, () -> view = target, null,
+			hits.add(new Hit(vx, vy, vx + vw, vy + vh, () -> view = target, null,
 				v == View.BLOCKING ? "First person while you hold right-click" : v.label, null));
 		}
-		y += ((views.size() + 2) / 3) * 16 + 4;
+		y += ((views.size() + 2) / 3) * (vh + vgap) + 4;
 		if (view == View.BLOCKING) {
 			y = smallWrapped(ctx, "Only while you hold right-click. Make it smaller or move it down to see more"
 				+ " of the screen.", ix1, y, iw, MUTED) + 4;
@@ -1606,14 +2150,24 @@ public final class StudioScreen extends Screen {
 
 		Adjust current = config.getAdjust(itemId, view);
 		Adjust shown = current == null ? new Adjust() : current;
+		boolean viewEdited = current != null && !current.isDefault();
+		y = sectionAction(ctx, "Size & position", "Reset", viewEdited, ix1, ix2, y, mouseX, mouseY, () -> {
+			Adjust a = config.getAdjust(itemId, view);
+			if (a != null && !a.isDefault()) {
+				a.reset();
+				changed(true);
+			}
+		}, "Put this view back to normal");
 		y = slider(ctx, "Size", "%", 0.1f, 3f, 0.05f, 1f, () -> shown.scale,
 			v -> config.editAdjust(itemId, view).scale = v, ix1, ix2, y, mouseX, mouseY, 100f);
+		y = caption(ctx, "Position", ix1, y + 1);
 		y = slider(ctx, "Left / right", "", -16f, 16f, 0.25f, 0f, () -> shown.x,
 			v -> config.editAdjust(itemId, view).x = v, ix1, ix2, y, mouseX, mouseY, 1f);
 		y = slider(ctx, "Up / down", "", -16f, 16f, 0.25f, 0f, () -> shown.y,
 			v -> config.editAdjust(itemId, view).y = v, ix1, ix2, y, mouseX, mouseY, 1f);
 		y = slider(ctx, "Forward / back", "", -16f, 16f, 0.25f, 0f, () -> shown.z,
 			v -> config.editAdjust(itemId, view).z = v, ix1, ix2, y, mouseX, mouseY, 1f);
+		y = caption(ctx, "Rotation", ix1, y + 1);
 		y = slider(ctx, "Tilt", "°", -180f, 180f, 5f, 0f, () -> shown.rotX,
 			v -> config.editAdjust(itemId, view).rotX = v, ix1, ix2, y, mouseX, mouseY, 1f);
 		y = slider(ctx, "Turn", "°", -180f, 180f, 5f, 0f, () -> shown.rotY,
@@ -1621,41 +2175,46 @@ public final class StudioScreen extends Screen {
 		y = slider(ctx, "Roll", "°", -180f, 180f, 5f, 0f, () -> shown.rotZ,
 			v -> config.editAdjust(itemId, view).rotZ = v, ix1, ix2, y, mouseX, mouseY, 1f);
 		y += 2;
-		String resetAll = "Reset all views";
-		boolean raHover = inside(mouseX, mouseY, ix1, y - 2, ix1 + textW(resetAll), y + 10);
-		text(ctx, resetAll, ix1, y, raHover ? 0xFFFFFFFF : pal.accentText());
-		hits.add(new Hit(ix1, y - 2, ix1 + textW(resetAll), y + 10, () -> {
+		boolean anyEdited = config.hasAdjust(itemId);
+		int rh = ctl - 2;
+		button(ctx, ix1, y, iw, rh, "Reset all views", anyEdited ? Icons.RESET : null, anyEdited ? BTN_NORMAL : BTN_FLAT, mouseX, mouseY, () -> {
 			if (config.hasAdjust(itemId)) {
 				config.adjust.remove(itemId);
 				changed(true);
 			}
-		}, null, null, null));
-		y += 12;
-		y = smallWrapped(ctx, "Right-click a slider to reset it", ix1, y, iw, MUTED);
+		}, anyEdited ? "Put every view of this item back to normal" : null);
+		y += rh + 6;
+		y = smallWrapped(ctx, "Right-click a slider to reset it. The arrows move it one step.", ix1, y, iw, MUTED);
 		ctx.disableScissor();
 		clipHits(firstHit, top, bottom);
 
-		int realContent = y + off - top + 6;
-		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
-		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+		sideContent = y + off - top + pad;
+		int max = Math.max(0, sideContent - (bottom - top));
+		scroll.put("side", Math.max(0, Math.min(max, scroll.getOrDefault("side", 0))));
+		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, max));
+		scrollBar(ctx, x2, top, bottom, scroll.getOrDefault("side", 0), max, false);
 	}
 
+	/** Height of the side panel's content as last drawn, so scrolling knows how far it can go. */
+	private int sideContent = 400;
+
 	private void drawPartSide(GuiGraphicsExtractor ctx, Target t, int x1, int x2, int top, int bottom, int mouseX, int mouseY) {
-		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
-		int off = scrollOf("side", 400, bottom - top);
+		int ix1 = x1 + pad, ix2 = x2 - pad, iw = ix2 - ix1;
+		int off = scrollOf("side", sideContent, bottom - top);
 		ctx.enableScissor(x1, top, x2, bottom);
 		int firstHit = hits.size();
-		int y = top + 8 - off;
+		int y = top + pad - off;
 		String key = t.key;
 		boolean resizable = t.part.resizable();
 		float size = resizable ? config.partSizeOf(key) : 1f;
-		roundRect(ctx, ix1, y, ix2, y + 56, pal.well());
-		outline(ctx, ix1, y, ix2, y + 56, pal.line());
+		int stageY = y;
+		y = drawStage(ctx, ix1, ix2, y, t, isEdited(t), false);
 		String style = ready() ? styleOf(key) : null;
 		PackSource src = style == null || index == null ? null : index.get(style);
 		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
-		int box = resizable ? Math.max(6, Math.round(40 * Math.min(1f, size))) : 40;
-		int bx = ix1 + iw / 2 - box / 2, by = y + 28 - box / 2;
+		int full = Math.min(stageH - 14, 56);
+		int box = resizable ? Math.max(6, Math.round(full * Math.min(1f, size))) : full;
+		int bx = ix1 + iw / 2 - box / 2, by = stageY + (stageH - 12) / 2 - box / 2;
 		boolean drawn = false;
 		if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR && config.crosshair != null) {
 			String drawnCross = config.crosshair;
@@ -1674,64 +2233,49 @@ public final class StudioScreen extends Screen {
 			drawn = drawPreview(ctx, src.id() + "|" + key, () -> previewOf(src, t), bx, by, box);
 		}
 		if (!drawn) drawTargetIcon(ctx, t, bx, by, box);
-		small(ctx, "Preview", ix1 + 5, y + 46, MUTED);
-		y += 62;
-		bold(ctx, trim(t.part.label(), iw), ix1, y, TEXT);
-		y += 11;
+		heading(ctx, trim(t.part.label(), iw), ix1, y, TEXT);
+		y += 12;
 		small(ctx, t.part.kind(), ix1, y, MUTED);
-		y += smallH();
+		y += smallH() + 3;
 		text(ctx, "Style", ix1, y + 2, MUTED);
 		String styleName = style == null ? "Default" : src != null ? src.displayName() : style + " (missing)";
-		int chipX = ix1 + textW("Style") + 6;
-		String chip = trim(styleName, ix2 - chipX - 10);
-		roundRect(ctx, chipX, y, chipX + textW(chip) + 10, y + 12, pal.soft());
-		text(ctx, chip, chipX + 5, y + 2, pal.accentText());
-		y += 18;
-		fill(ctx, ix1, y, ix2, y + 1, pal.line());
-		y += 8;
+		int chipX = ix1 + textW("Style") + 7;
+		String chip = trim(styleName, ix2 - chipX - 12);
+		round(ctx, chipX, y, chipX + textW(chip) + 10, y + 13, style == null ? pal.surface() : pal.soft(), shapeSm());
+		text(ctx, chip, chipX + 5, y + 3, style == null ? TEXT2 : pal.accentText());
+		y += 19;
 		if (resizable) {
-			bold(ctx, "Size", ix1, y, TEXT);
-			String resetLabel = "Reset";
-			int rw = textW(resetLabel);
-			boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
-			text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
-			hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+			boolean changedSize = config.partSize.containsKey(key);
+			y = sectionAction(ctx, "Size", "Reset", changedSize, ix1, ix2, y, mouseX, mouseY, () -> {
 				if (config.partSize.containsKey(key)) {
 					config.setPartSize(key, 1f);
 					changed(true);
 				}
-			}, null, "Back to normal size", null));
-			y += 14;
+			}, "Back to normal size");
 			y = slider(ctx, "Particle size", "%", 0.1f, 2f, 0.05f, 1f, () -> config.partSizeOf(key),
 				v -> config.setPartSize(key, v), ix1, ix2, y, mouseX, mouseY, 100f);
-			String all = "Use this size for all particles";
-			boolean allHover = inside(mouseX, mouseY, ix1, y - 2, ix1 + textW(all), y + 10);
-			text(ctx, trim(all, iw), ix1, y, allHover ? 0xFFFFFFFF : pal.accentText());
-			hits.add(new Hit(ix1, y - 2, ix1 + Math.min(iw, textW(all)), y + 10, () -> {
+			y += 2;
+			int rh = ctl - 2;
+			button(ctx, ix1, y, iw, rh, "Use this size for all particles", null, BTN_NORMAL, mouseX, mouseY, () -> {
 				float chosen = config.partSizeOf(key);
 				for (TexturePart p : Category.PARTICLES.parts()) config.setPartSize(p.key(), chosen);
 				changed(true);
-			}, null, "Every particle gets " + Math.round(size * 100) + "%", null));
-			y += 14;
+			}, "Every particle gets " + Math.round(size * 100) + "%");
+			y += rh + 6;
 			y = smallWrapped(ctx, "Smaller works on every particle. Above 100% a particle only grows into empty space around"
 				+ " its picture; ones that fill their picture get their edges cut.", ix1, y, iw, MUTED);
 		} else if (t.part.heightAdjustable()) {
-			bold(ctx, "Height", ix1, y, TEXT);
-			String resetLabel = "Reset";
-			int rw = textW(resetLabel);
-			boolean resetHover = inside(mouseX, mouseY, ix2 - rw - 2, y - 2, ix2, y + 10);
-			text(ctx, resetLabel, ix2 - rw, y, resetHover ? 0xFFFFFFFF : pal.accentText());
-			hits.add(new Hit(ix2 - rw - 2, y - 2, ix2, y + 10, () -> {
+			boolean lowered = config.partSize.containsKey(key);
+			y = sectionAction(ctx, "Height", "Reset", lowered, ix1, ix2, y, mouseX, mouseY, () -> {
 				if (config.partSize.containsKey(key)) {
 					config.setPartSize(key, 1f);
 					changed(true);
 				}
-			}, null, "Back to normal fire", null));
-			y += 14;
+			}, "Back to normal fire");
 			y = slider(ctx, "Fire height", "%", 0.1f, 1f, 0.05f, 1f, () -> config.partSizeOf(key),
 				v -> config.setPartSize(key, v), ix1, ix2, y, mouseX, mouseY, 100f);
 			y = smallWrapped(ctx, "Lower = less fire on your screen when you burn. Fire on burning blocks and mobs gets"
-				+ " lower too, because the game uses the same picture.", ix1, y, iw, MUTED);
+				+ " lower too, because the game uses the same picture.", ix1, y + 2, iw, MUTED);
 		} else if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR) {
 			y = drawCrosshairEditor(ctx, ix1, ix2, y, top, bottom, mouseX, mouseY);
 		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
@@ -1741,9 +2285,11 @@ public final class StudioScreen extends Screen {
 		}
 		ctx.disableScissor();
 		clipHits(firstHit, top, bottom);
-		int realContent = y + off - top + 6;
-		scroll.put("side", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("side", 0))));
-		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+		sideContent = y + off - top + pad;
+		int max = Math.max(0, sideContent - (bottom - top));
+		scroll.put("side", Math.max(0, Math.min(max, scroll.getOrDefault("side", 0))));
+		scrollAreas.add(new ScrollArea("side", x1, top, x2, bottom, max));
+		scrollBar(ctx, x2, top, bottom, scroll.getOrDefault("side", 0), max, false);
 	}
 
 	private static final String[] CROSS_PRESETS = {"Plus", "Gap", "Dot", "Circle", "X", "Clear"};
@@ -1751,34 +2297,35 @@ public final class StudioScreen extends Screen {
 	/** A 15x15 grid to draw a crosshair on, with a few ready-made shapes. Returns the y below it. */
 	private int drawCrosshairEditor(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int top, int bottom, int mouseX, int mouseY) {
 		int iw = ix2 - ix1;
-		bold(ctx, "Draw your own", ix1, y, TEXT);
-		if (config.crosshair != null) {
-			String off = "Turn off";
-			int ow = textW(off);
-			boolean oh = inside(mouseX, mouseY, ix2 - ow - 2, y - 2, ix2, y + 10);
-			text(ctx, off, ix2 - ow, y, oh ? 0xFFFFFFFF : pal.accentText());
-			hits.add(new Hit(ix2 - ow - 2, y - 2, ix2, y + 10, () -> {
-				config.crosshair = null;
-				changed(true);
-			}, null, "Go back to the picked crosshair style", null));
-		}
-		y += 14;
-		int cell = Math.max(4, Math.min(8, iw / 15));
+		y = sectionAction(ctx, "Draw your own", "Turn off", config.crosshair != null, ix1, ix2, y, mouseX, mouseY, () -> {
+			config.crosshair = null;
+			changed(true);
+		}, "Go back to the picked crosshair style");
+		int cell = Math.max(4, Math.min(9, (iw - 8) / 15));
 		int size = cell * 15;
 		int gx = ix1 + (iw - size) / 2;
-		roundRect(ctx, gx - 3, y - 3, gx + size + 3, y + size + 3, pal.well());
+		box(ctx, gx - 4, y - 1, gx + size + 4, y + size + 3, pal.well(), pal.line(), shapeSm());
+		y += 1;
 		String pattern = config.crosshair != null ? config.crosshair : crosshairSeed();
-		int gap = cell > 4 ? 1 : 0;
+		boolean drawing = config.crosshair != null;
+		// the middle row and column show where the game aims; the rest of the grid is just the dark box
+		fill(ctx, gx, y + 7 * cell, gx + size, y + 8 * cell, 0x0DFFFFFF);
+		fill(ctx, gx + 7 * cell, y, gx + 8 * cell, y + size, 0x0DFFFFFF);
+		fill(ctx, gx + 7 * cell, y + 7 * cell, gx + 8 * cell, y + 8 * cell, pal.soft());
 		int hoverC = (int) Math.floor((mouseX - gx) / (double) cell), hoverR = (int) Math.floor((mouseY - y) / (double) cell);
+		boolean overGrid = hoverC >= 0 && hoverC < 15 && hoverR >= 0 && hoverR < 15 && mouseY >= top && mouseY < bottom;
+		int gap = cell > 4 ? 1 : 0;
 		for (int r = 0; r < 15; r++) {
 			for (int c = 0; c < 15; c++) {
 				boolean on = pattern.charAt(r * 15 + c) == '1';
-				int color = on ? (config.crosshair != null ? 0xFFFFFFFF : 0x99FFFFFF)
-					: (r == 7 && c == 7) ? pal.soft() : ((r + c) % 2 == 0 ? 0x16FFFFFF : 0x0AFFFFFF);
+				if (!on) continue;
 				int cx = gx + c * cell, cy = y + r * cell;
-				fill(ctx, cx, cy, cx + cell - gap, cy + cell - gap, color);
-				if (r == hoverR && c == hoverC) outline(ctx, cx - 1, cy - 1, cx + cell, cy + cell, pal.accent());
+				fill(ctx, cx, cy, cx + cell - gap, cy + cell - gap, drawing ? WHITE : 0x99FFFFFF);
 			}
+		}
+		if (overGrid && !profilesOpen) {
+			int cx = gx + hoverC * cell, cy = y + hoverR * cell;
+			box(ctx, cx - 1, cy - 1, cx + cell + 1 - gap, cy + cell + 1 - gap, 0x22FFFFFF, pal.accent(), CORNERS_NONE);
 		}
 		crossX = gx;
 		crossY = y;
@@ -1786,16 +2333,17 @@ public final class StudioScreen extends Screen {
 		crossTop = top;
 		crossBottom = bottom;
 		crossShown = true;
-		y += size + 8;
+		y += size + 9;
 		int bw = (iw - 8) / 3;
+		int bh = ctl - 2;
 		for (int i = 0; i < CROSS_PRESETS.length; i++) {
 			String name = CROSS_PRESETS[i];
-			button(ctx, ix1 + (i % 3) * (bw + 4), y + (i / 3) * 18, bw, 15, name, false, false, mouseX, mouseY, () -> {
+			button(ctx, ix1 + (i % 3) * (bw + 4), y + (i / 3) * (bh + 3), bw, bh, name, null, BTN_NORMAL, mouseX, mouseY, () -> {
 				config.crosshair = crosshairPreset(name);
 				changed(true);
 			}, name.equals("Clear") ? "Start from an empty grid" : "Start from a " + name.toLowerCase(Locale.ROOT) + " shape");
 		}
-		y += 2 * 18 + 2;
+		y += 2 * (bh + 3) + 3;
 		return smallWrapped(ctx, config.crosshair == null
 			? "This is the crosshair you have now. MouseButtonEvent a square or a shape to start drawing."
 			: "MouseButtonEvent to draw, right-click to erase. The game flips the colours behind the crosshair, so it stays easy"
@@ -1882,163 +2430,345 @@ public final class StudioScreen extends Screen {
 		return true;
 	}
 
-	private int slider(GuiGraphicsExtractor ctx, String label, String unit, float min, float max, float step, float def,
-	                   Supplier<Float> get, Consumer<Float> set, int barX1, int barX2, int y, int mouseX, int mouseY,
-	                   float displayMul) {
-		float value = get.get();
-		boolean changedValue = Math.abs(value - def) > 1e-4f;
-		text(ctx, label, barX1, y, changedValue ? TEXT : TEXT2);
-		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
-			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
-		text(ctx, shown, barX2 - textW(shown), y, changedValue ? pal.accentText() : MUTED);
+	// ------------------------------------------------------------------ settings
 
-		int by = y + 12;
-		roundRect(ctx, barX1, by, barX2, by + 3, pal.track());
-		float t = (value - min) / (max - min);
-		float t0 = (def - min) / (max - min);
-		int kx = barX1 + Math.round(t * (barX2 - barX1));
-		int zx = barX1 + Math.round(t0 * (barX2 - barX1));
-		fill(ctx, Math.min(kx, zx), by, Math.max(kx, zx), by + 3, pal.accent());
-		boolean hover = inside(mouseX, mouseY, barX1 - 3, y, barX2 + 3, y + 17) || dragging != null && dragging.label.equals(label);
-		if (hover) roundRect(ctx, kx - 5, by - 3, kx + 5, by + 6, pal.glow());
-		roundRect(ctx, kx - 3, by - 2, kx + 3, by + 5, 0xFFFFFFFF);
+	private static String versionText;
 
-		Slider slider = new Slider(label, min, max, step, def, get, set, barX1, barX2);
-		hits.add(new Hit(barX1 - 3, y, barX2 + 3, y + 17, null, null, null, slider));
-		return y + 20;
+	private static String versionText() {
+		if (versionText == null) versionText = dev.itemstudio.UpdateCheck.currentVersion();
+		return versionText;
 	}
+
+	private static final String[] SETTINGS_TABS = {"Look", "Layout", "General"};
 
 	private void drawSettings(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
 		int x1 = sideX, x2 = px + pw - 1, top = bodyY, bottom = footerY;
 		fill(ctx, x1, top, x2, bottom, pal.rail());
 		fill(ctx, x1 - 1, top, x1, bottom, pal.line());
-		int ix1 = x1 + 8, ix2 = x2 - 8, iw = ix2 - ix1;
-		int off = scrollOf("settings", 400, bottom - top);
-		ctx.enableScissor(x1, top, x2, bottom);
-		int firstHit = hits.size();
-		int y = top + 10 - off;
-		bold(ctx, "Settings", ix1, y, TEXT);
-		// mod on/off switch, right side of the title row
+		int ix1 = x1 + pad, ix2 = x2 - pad, iw = ix2 - ix1;
+		int y = top + pad;
+
+		// title row with the on/off switch of the whole mod
+		heading(ctx, "Settings", ix1, y + 1, TEXT);
 		boolean modOn = config.enabled;
-		String onLabel = modOn ? "Mod on" : "Mod off";
-		int swX = ix2 - 18 - 5 - textW(onLabel);
-		int trackY = y - 1;
-		roundRect(ctx, swX, trackY, swX + 18, trackY + 10, modOn ? pal.strong() : pal.line2());
-		int knobX = modOn ? swX + 9 : swX + 1;
-		roundRect(ctx, knobX, trackY + 1, knobX + 8, trackY + 9, 0xFFFFFFFF);
-		text(ctx, onLabel, swX + 23, y, modOn ? TEXT2 : WARN);
-		hits.add(new Hit(swX - 2, y - 3, ix2, y + 11, () -> {
+		String onLabel = modOn ? "On" : "Off";
+		int swW = 20 + 5 + textW(onLabel);
+		int swX = ix2 - swW;
+		boolean hoverMod = hot(mouseX, mouseY, swX - 4, y - 3, ix2 + 3, y + 13);
+		float mt = anim.fade(Anim.key(0x7600, 0), hoverMod, 16f);
+		round(ctx, swX - 4, y - 3, ix2 + 3, y + 13, Anim.mix(0, pal.surface(), mt), shapeSm());
+		drawSwitch(ctx, swX, y, modOn, Anim.key(0x7601, 0));
+		text(ctx, onLabel, swX + 25, y + 1, modOn ? TEXT2 : WARN);
+		hits.add(new Hit(swX - 4, y - 3, ix2 + 3, y + 13, () -> {
 			ItemStudioClient.setEnabled(!config.enabled);
 			setStatus(config.enabled ? "Item Studio turned on" : "Item Studio turned off - your normal packs are back", config.enabled ? GOOD : WARN);
 		}, null, "Turn Item Studio on or off. Off puts your normal packs back; your picks stay saved.", null));
-		y += 16;
+		y += 20;
 
-		// theme: colour swatches, 6 to a row
-		text(ctx, "Theme", ix1, y, TEXT2);
-		String themeName = theme().label;
-		text(ctx, themeName, ix2 - textW(themeName), y, pal.accentText());
-		y += 12;
+		// tabs
+		int[] tabW = new int[SETTINGS_TABS.length];
+		Icons[] tabIcons = {Icons.PALETTE, Icons.LAYOUT, Icons.SLIDERS};
+		boolean showTabIcons = iw >= 150;
+		for (int i = 0; i < tabW.length; i++) tabW[i] = textW(SETTINGS_TABS[i]) + (showTabIcons ? tabIcons[i].w + 4 : 0) + 12;
+		segmented(ctx, 0x7610, ix1, y, iw, ctl, SETTINGS_TABS, showTabIcons ? tabIcons : null, tabW, settingsTab, mouseX, mouseY, i -> {
+			settingsTab = i;
+			lastSettingsTab = i;
+			resetScroll("settings");
+			listening = null;
+		}, null);
+		y += ctl + 6;
+		fill(ctx, x1, y - 3, x2, y - 2, pal.line());
+
+		// the bar at the bottom stays put: reset the look, or be done
+		int barH = ctl + 10;
+		int contentTop = y - 2, contentBottom = bottom - barH;
+		int off = scrollOf("settings", settingsContent, contentBottom - contentTop);
+		ctx.enableScissor(x1, contentTop, x2, contentBottom);
+		int firstHit = hits.size();
+		y = contentTop + 7 - off;
+		switch (settingsTab) {
+			case 0 -> y = settingsLook(ctx, ix1, ix2, y, mouseX, mouseY);
+			case 1 -> y = settingsLayout(ctx, ix1, ix2, y, mouseX, mouseY);
+			default -> y = settingsGeneral(ctx, ix1, ix2, y, mouseX, mouseY);
+		}
+		ctx.disableScissor();
+		clipHits(firstHit, contentTop, contentBottom);
+		settingsContent = y + off - contentTop + 4;
+		int max = Math.max(0, settingsContent - (contentBottom - contentTop));
+		scroll.put("settings", Math.max(0, Math.min(max, scroll.getOrDefault("settings", 0))));
+		scrollAreas.add(new ScrollArea("settings", x1, contentTop, x2, contentBottom, max));
+		scrollBar(ctx, x2, contentTop, contentBottom, scroll.getOrDefault("settings", 0), max, false);
+
+		fill(ctx, x1, contentBottom, x2, bottom, pal.rail());
+		fill(ctx, x1, contentBottom, x2, contentBottom + 1, pal.line());
+		int by = contentBottom + (barH - ctl) / 2;
+		int half = (iw - 4) / 2;
+		String resetLabel = buttonW("Reset look", Icons.RESET) <= half ? "Reset look" : "Reset";
+		button(ctx, ix1, by, half, ctl, resetLabel, Icons.RESET, BTN_NORMAL, mouseX, mouseY, () -> {
+			config.resetLook();
+			config.save();
+			setStatus("Menu look put back to how it came", MUTED);
+		}, "Theme, accent, opacity, font, spacing, corners and motion back to the defaults");
+		button(ctx, ix1 + half + 4, by, iw - half - 4, ctl, "Done", Icons.CHECK, BTN_PRIMARY, mouseX, mouseY,
+			() -> settingsOpen = false, null);
+	}
+
+	private int settingsContent = 400;
+
+	private int settingsGap() {
+		return compact ? 7 : 10;
+	}
+
+	private int settingsLook(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		int[] sm = shapeSm();
+
+		// theme: a tiny picture of each theme, 6 to a row
+		y = section(ctx, "Theme", theme().label, ix1, ix2, y);
 		Theme[] themes = Theme.values();
-		int gap = 4;
-		int perRow = 6;
-		int sw = (iw - gap * (perRow - 1)) / perRow;
+		int perRow = 6, sg = 4;
+		int sw = (iw - sg * (perRow - 1)) / perRow;
+		int sh = compact ? 16 : 18;
 		for (int i = 0; i < themes.length; i++) {
 			Theme t = themes[i];
-			int tx = ix1 + (i % perRow) * (sw + gap);
-			int ty = y + (i / perRow) * 18;
+			int tx = ix1 + (i % perRow) * (sw + sg);
+			int ty = y + (i / perRow) * (sh + sg);
 			boolean on = t == theme();
-			boolean hover = inside(mouseX, mouseY, tx, ty, tx + sw, ty + 14);
-			if (on || hover) outline(ctx, tx - 1, ty - 1, tx + sw + 1, ty + 15, on ? 0xFFFFFFFF : pal.accentText());
-			roundRect(ctx, tx + 1, ty + 1, tx + sw - 1, ty + 13, 0xFF000000 | t.base);
-			roundRect(ctx, tx + 3, ty + 3, tx + sw - 3, ty + 11, 0xFF000000 | t.accent);
-			hits.add(new Hit(tx, ty, tx + sw, ty + 14, () -> {
+			boolean hover = hot(mouseX, mouseY, tx, ty, tx + sw, ty + sh);
+			float ht = anim.fade(Anim.key(0x7500, i), hover && !on, 16f);
+			if (on) box(ctx, tx - 2, ty - 2, tx + sw + 2, ty + sh + 2, 0, WHITE, sm);
+			else if (ht > 0.02f) box(ctx, tx - 2, ty - 2, tx + sw + 2, ty + sh + 2, 0, Anim.mix(0, 0x99FFFFFF, ht), sm);
+			round(ctx, tx, ty, tx + sw, ty + sh, 0xFF000000 | t.base, sm);
+			round(ctx, tx + 3, ty + 3, tx + sw / 2 + 1, ty + 6, 0xFF000000 | t.strong, CORNERS_1);
+			round(ctx, tx + 3, ty + sh - 7, tx + sw - 3, ty + sh - 3, 0xFF000000 | t.accent, CORNERS_1);
+			hits.add(new Hit(tx, ty, tx + sw, ty + sh, () -> {
 				config.theme = t.name();
 				config.save();
 			}, null, t.label, null));
 		}
-		y += ((themes.length + perRow - 1) / perRow) * 18 + 4;
+		y += ((themes.length + perRow - 1) / perRow) * (sh + sg) + settingsGap() - sg;
 
-		y = slider(ctx, "Opacity", "%", 0.4f, 1f, 0.05f, 0.78f, () -> config.opacity,
-			v -> {
-				config.opacity = v;
+		// accent: the theme's own, or any of these
+		int accentNow = accentRgb();
+		String accentName = "From theme";
+		for (int i = 0; i < Theme.ACCENTS.length; i++) if (Theme.ACCENTS[i] == accentNow) accentName = Theme.ACCENT_NAMES[i];
+		if (accentNow >= 0 && accentName.equals("From theme")) accentName = "#" + Theme.accentHex(accentNow);
+		y = section(ctx, "Accent", accentName, ix1, ix2, y);
+		int dots = Theme.ACCENTS.length + 1;
+		int dperRow = 7;
+		int ds = Math.max(12, Math.min(16, (iw - 4 * (dperRow - 1)) / dperRow));
+		int dg = (iw - ds * dperRow) / (dperRow - 1);
+		for (int i = 0; i < dots; i++) {
+			int dx = ix1 + (i % dperRow) * (ds + dg);
+			int dy = y + (i / dperRow) * (ds + 5);
+			boolean auto = i == 0;
+			int rgb = auto ? theme().accent : Theme.ACCENTS[i - 1];
+			boolean on = auto ? accentNow < 0 : accentNow == rgb;
+			boolean hover = hot(mouseX, mouseY, dx, dy, dx + ds, dy + ds);
+			float ht = anim.fade(Anim.key(0x7510, i), hover && !on, 16f);
+			int[] pill = shapePill(ds);
+			if (on) box(ctx, dx - 2, dy - 2, dx + ds + 2, dy + ds + 2, 0, WHITE, shapePill(ds + 4));
+			else if (ht > 0.02f) box(ctx, dx - 2, dy - 2, dx + ds + 2, dy + ds + 2, 0, Anim.mix(0, 0x99FFFFFF, ht), shapePill(ds + 4));
+			if (auto) {
+				box(ctx, dx, dy, dx + ds, dy + ds, pal.surface(), 0xFF000000 | rgb, pill);
+				boldCentered(ctx, "A", dx, dx + ds, dy + (ds - 8) / 2, 0xFF000000 | rgb);
+			} else {
+				round(ctx, dx, dy, dx + ds, dy + ds, 0xFF000000 | rgb, pill);
+			}
+			final int pick = rgb;
+			hits.add(new Hit(dx, dy, dx + ds, dy + ds, () -> {
+				config.accent = auto ? null : Theme.accentHex(pick);
 				config.save();
-			}, ix1, ix2, y, mouseX, mouseY, 100f);
-		y += 4;
+			}, null, auto ? "The theme's own accent (" + theme().label + ")" : Theme.ACCENT_NAMES[i - 1], null));
+		}
+		y += ((dots + dperRow - 1) / dperRow) * (ds + 5) + settingsGap() - 5;
+
+		// opacity
+		y = section(ctx, "Window", null, ix1, ix2, y);
+		y = slider(ctx, "Opacity", "%", 0.4f, 1f, 0.05f, 0.78f, () -> config.opacity, v -> {
+			config.opacity = v;
+			config.save();
+		}, ix1, ix2, y, mouseX, mouseY, 100f);
+		y += 3;
+		text(ctx, "Corners", ix1, y + 2, TEXT2);
+		String[] corners = {"Sharp", "Soft", "Round"};
+		int cw = Math.min(iw - textW("Corners") - 8, 3 * 44);
+		segmented(ctx, 0x7620, ix2 - cw, y - 1, cw, ctl, corners, null, null, config.corners, mouseX, mouseY, i -> {
+			config.corners = i;
+			config.save();
+		}, new String[]{"Square corners", "Slightly rounded corners", "Rounded corners"});
+		y += ctl + settingsGap();
 
 		// fonts: each name is shown in its own font
-		text(ctx, "Text font", ix1, y, TEXT2);
-		y += 12;
+		y = section(ctx, "Text font", menuFont().label, ix1, ix2, y);
 		MenuFont[] fonts = MenuFont.values();
-		int fw = (iw - gap) / 2;
+		int fg = 4;
+		int fw = (iw - fg) / 2;
+		int fh = compact ? 16 : 18;
 		MenuFont currentFont = menuFont();
 		for (int i = 0; i < fonts.length; i++) {
 			MenuFont f = fonts[i];
-			int fx = ix1 + (i % 2) * (fw + gap);
-			int fy = y + (i / 2) * 18;
+			int fx = ix1 + (i % 2) * (fw + fg);
+			int fy = y + (i / 2) * (fh + fg);
 			boolean on = f == currentFont;
-			boolean hover = inside(mouseX, mouseY, fx, fy, fx + fw, fy + 15);
-			roundRect(ctx, fx, fy, fx + fw, fy + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-			outline(ctx, fx, fy, fx + fw, fy + 15, on ? pal.accent() : pal.surfaceBorder());
+			boolean hover = hot(mouseX, mouseY, fx, fy, fx + fw, fy + fh);
+			float ht = anim.fade(Anim.key(0x7520, i), hover && !on, 16f);
+			float st = anim.fade(Anim.key(0x7521, i), on, 16f);
+			box(ctx, fx, fy, fx + fw, fy + fh, Anim.mix(Anim.mix(pal.surface(), pal.surfaceHover(), ht), pal.soft(), st),
+				Anim.mix(Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ht), pal.accent(), st), sm);
 			MutableComponent label = styledIn(f.label, f, false);
 			int lw = font.width(label);
 			if (lw > fw - 6) {
 				label = styledIn(f.label.substring(0, Math.min(f.label.length(), 9)) + ".", f, false);
 				lw = font.width(label);
 			}
-			ctx.text(font, label, fx + (fw - lw) / 2, fy + 4, on ? 0xFFFFFFFF : TEXT2, false);
-			hits.add(new Hit(fx, fy, fx + fw, fy + 15, () -> {
+			ctx.text(font, label, fx + (fw - lw) / 2, fy + (fh - 8) / 2, on ? WHITE : Anim.mix(TEXT2, WHITE, ht), false);
+			hits.add(new Hit(fx, fy, fx + fw, fy + fh, () -> {
 				config.setFont(f.id);
 				config.save();
 			}, null, f.label, null));
 		}
-		y += ((fonts.length + 1) / 2) * 18 + 4;
+		y += ((fonts.length + 1) / 2) * (fh + fg) - fg + 4;
+		return y;
+	}
 
-		// style card size
-		text(ctx, "Card size", ix1, y, TEXT2);
-		y += 12;
-		String[] sizes = {"Small", "Medium", "Large"};
-		int segW = (iw - gap * 2) / 3;
-		for (int i = 0; i < 3; i++) {
-			int sx = ix1 + i * (segW + gap);
-			boolean on = config.cardSize == i;
-			boolean hover = inside(mouseX, mouseY, sx, y, sx + segW, y + 15);
-			roundRect(ctx, sx, y, sx + segW, y + 15, on ? pal.soft() : hover ? pal.surfaceHover() : pal.surface());
-			outline(ctx, sx, y, sx + segW, y + 15, on ? pal.accent() : pal.surfaceBorder());
-			String l = trim(sizes[i], segW - 4);
-			text(ctx, l, sx + (segW - textW(l)) / 2, y + 4, on ? 0xFFFFFFFF : TEXT2);
-			final int value = i;
-			hits.add(new Hit(sx, y, sx + segW, y + 15, () -> {
-				config.cardSize = value;
-				config.save();
-			}, null, "Size of the style cards", null));
-		}
-		y += 22;
+	private int settingsLayout(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		int sg = settingsGap();
 
-		// update check switch
-		String upd = "Check for updates";
-		boolean updOn = config.checkUpdates;
-		roundRect(ctx, ix1, y + 1, ix1 + 18, y + 11, updOn ? pal.strong() : pal.line2());
-		int uk = updOn ? ix1 + 9 : ix1 + 1;
-		roundRect(ctx, uk, y + 2, uk + 8, y + 10, 0xFFFFFFFF);
-		text(ctx, trim(upd, iw - 24), ix1 + 23, y + 2, TEXT2);
-		hits.add(new Hit(ix1, y - 1, ix2, y + 13, () -> {
+		y = section(ctx, "Spacing", null, ix1, ix2, y);
+		segmented(ctx, 0x7630, ix1, y, iw, ctl, new String[]{"Auto", "Compact", "Roomy"}, null, null, config.density, mouseX, mouseY, i -> {
+			config.density = i;
+			config.save();
+		}, new String[]{"Tighter on small screens", "Always tight: more fits on the screen", "Always airy: bigger buttons and rows"});
+		y += ctl + 4;
+		y = smallWrapped(ctx, "Auto uses compact spacing when the screen is small (GUI scale 4 on a 1080p screen is).", ix1, y, iw, MUTED) + sg - 4;
+
+		y = section(ctx, "Style cards", null, ix1, ix2, y);
+		segmented(ctx, 0x7631, ix1, y, iw, ctl, new String[]{"Small", "Medium", "Large"}, null, null, config.cardSize, mouseX, mouseY, i -> {
+			config.cardSize = i;
+			config.save();
+		}, new String[]{"Smaller cards: more at once", "Size of the style cards", "Bigger cards: easier to see"});
+		y += ctl + sg;
+
+		y = section(ctx, "Category list", null, ix1, ix2, y);
+		segmented(ctx, 0x7632, ix1, y, iw, ctl, new String[]{"Auto", "Icons", "Names"}, null, null, config.sidebar, mouseX, mouseY, i -> {
+			config.sidebar = i;
+			config.save();
+		}, new String[]{"Names when there is room", "Only icons: leaves more room for the cards", "Always show the names"});
+		y += ctl + sg;
+
+		y = section(ctx, "Side panel", null, ix1, ix2, y);
+		segmented(ctx, 0x7633, ix1, y, iw, ctl, new String[]{"Narrow", "Normal", "Wide"}, null, null, config.panelWidth, mouseX, mouseY, i -> {
+			config.panelWidth = i;
+			config.save();
+		}, new String[]{"Less room for the sliders", "Width of the preview and sliders", "More room for the sliders"});
+		y += ctl + sg;
+
+		y = section(ctx, "Motion", null, ix1, ix2, y);
+		y = switchRow(ctx, "Animations", "Fades, sliding highlights, smooth scrolling", config.animations, ix1, ix2, y, mouseX, mouseY, () -> {
+			config.animations = !config.animations;
+			config.save();
+		}, "Turn off for a menu that changes at once");
+		return y;
+	}
+
+	private int settingsGeneral(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		int sg = settingsGap();
+
+		y = section(ctx, "Behaviour", null, ix1, ix2, y);
+		y = switchRow(ctx, "Check for updates", "Looks on GitHub once per game", config.checkUpdates, ix1, ix2, y, mouseX, mouseY, () -> {
 			config.checkUpdates = !config.checkUpdates;
 			config.save();
-		}, null, "Look for a newer Item Studio on GitHub once per game session", null));
-		y += 18;
+		}, "Look for a newer Item Studio on GitHub once per game session");
+		y = switchRow(ctx, "Tooltips", "Hints when the mouse rests on something", config.tooltips, ix1, ix2, y, mouseX, mouseY, () -> {
+			config.tooltips = !config.tooltips;
+			config.save();
+		}, "Turn the little hint boxes on or off");
+		dev.itemstudio.UpdateCheck.Update update = dev.itemstudio.UpdateCheck.found();
+		if (update != null) {
+			int rh = ctl;
+			button(ctx, ix1, y + 2, iw, rh, "Get " + update.version(), Icons.EXPORT, BTN_SOFT, mouseX, mouseY, () -> {
+				java.net.URI releasePage = java.net.URI.create(update.url());
+				Util.getPlatform().openUri(releasePage);
+			}, "Item Studio " + update.version() + " is out (you have " + versionText() + "). Opens the download page.");
+			y += rh + 6;
+		}
+		y += sg - 2;
 
-		String keyName = ItemStudioClient.openKey().getTranslatedKeyMessage().getString();
-		y = smallWrapped(ctx, "Menu key: " + keyName + ". Ctrl+Z undoes, Ctrl+F searches.", ix1, y, iw, MUTED) + 6;
-		int half = (iw - gap) / 2;
-		button(ctx, ix1, y, half, 16, "Keybinds", false, false, mouseX, mouseY,
-			() -> minecraft.gui.setScreen(new StudioConfigScreen(this)), "Change the menu key and the on/off key");
-		button(ctx, ix1 + half + gap, y, iw - half - gap, 16, "Done", true, false, mouseX, mouseY, () -> settingsOpen = false, null);
-		y += 22;
-		ctx.disableScissor();
-		clipHits(firstHit, top, bottom);
-		int realContent = y + off - top;
-		scroll.put("settings", Math.max(0, Math.min(Math.max(0, realContent - (bottom - top)), scroll.getOrDefault("settings", 0))));
-		scrollAreas.add(new ScrollArea("settings", x1, top, x2, bottom, Math.max(0, realContent - (bottom - top))));
+		y = section(ctx, "Keys", null, ix1, ix2, y);
+		y = keyRow(ctx, "Open menu", ItemStudioClient.openKey(), ix1, ix2, y, mouseX, mouseY);
+		y = keyRow(ctx, "Turn on/off", ItemStudioClient.toggleKey(), ix1, ix2, y, mouseX, mouseY);
+		y = keyRow(ctx, "Next profile", ItemStudioClient.nextProfileKey(), ix1, ix2, y, mouseX, mouseY);
+		y = smallWrapped(ctx, listening != null ? "Press a key now. Esc clears it. MouseButtonEvent anywhere to cancel."
+			: "MouseButtonEvent a key, then press the new one. Esc clears it. Middle and side mouse buttons work too.", ix1, y + 1, iw, MUTED) + sg - 2;
+
+		y = section(ctx, "Shortcuts", null, ix1, ix2, y);
+		String[][] shortcuts = {{"Ctrl+Z", "Undo"}, {"Ctrl+F", "Search every item"}, {"Ctrl+S", "Apply"}, {"Esc", "Close"}};
+		int keyW = 0;
+		for (String[] s : shortcuts) keyW = Math.max(keyW, smallW(s[0]));
+		keyW += 8;
+		for (String[] s : shortcuts) {
+			int rowH = smallH() + 4;
+			round(ctx, ix1, y, ix1 + keyW, y + rowH, pal.surface(), shapeSm());
+			small(ctx, s[0], ix1 + 4, y + 2, TEXT2);
+			small(ctx, smallTrim(s[1], iw - keyW - 6), ix1 + keyW + 6, y + 2, MUTED);
+			y += rowH + 3;
+		}
+		y = smallWrapped(ctx, "Right-click a style card to star it, or a slider to put it back.", ix1, y + 1, iw, MUTED);
+		y += sg - 3;
+
+		y = section(ctx, "About", null, ix1, ix2, y);
+		text(ctx, "Item Studio " + versionText(), ix1, y, TEXT2);
+		y += 12;
+		y = smallWrapped(ctx, "Everything here is saved by itself. Your picks live in config/itemstudio.json.", ix1, y, iw, MUTED);
+		return y;
+	}
+
+	/** One key setting: its name and a button showing the key; click it, then press the new key. */
+	private int keyRow(GuiGraphicsExtractor ctx, String label, net.minecraft.client.KeyMapping key, int ix1, int ix2, int y,
+	                   int mouseX, int mouseY) {
+		int iw = ix2 - ix1;
+		int h = ctl;
+		boolean waiting = listening == key;
+		String name = key.getTranslatedKeyMessage().getString();
+		String clash = waiting ? null : clashWith(key);
+		String shown = waiting ? "Press a key..." : key.isUnbound() ? "None" : name;
+		int bw = Math.max(54, Math.min(iw - textW(label) - 10, textW(shown) + 16));
+		int bx = ix2 - bw;
+		boolean hover = hot(mouseX, mouseY, bx, y, ix2, y + h);
+		float ht = anim.fade(fadeKey(label, ix1), hover, 16f);
+		float pulse = waiting ? (float) (0.5 + 0.5 * Math.sin(clock * 6)) : 0f;
+		int fillColor = waiting ? pal.soft() : Anim.mix(pal.surface(), pal.surfaceHover(), ht);
+		int border = waiting ? Anim.mix(pal.accent() & 0x80FFFFFF, pal.accent(), pulse)
+			: clash != null ? 0xFFE5646E : Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), ht);
+		text(ctx, trim(label, iw - bw - 8), ix1, y + (h - 8) / 2, TEXT2);
+		box(ctx, bx, y, ix2, y + h, fillColor, border, shapeSm());
+		String t = trim(shown, bw - 8);
+		textCentered(ctx, t, bx, ix2, y + (h - 8) / 2, waiting ? WARN : clash != null ? 0xFFFF8C94 : key.isUnbound() ? MUTED : WHITE);
+		hits.add(new Hit(bx, y, ix2, y + h, () -> listening = waiting ? null : key, null,
+			clash != null ? "Also used by: " + clash : "MouseButtonEvent, then press the key you want", null));
+		return y + h + 4;
+	}
+
+	/** Name of another control on the same key, or null. */
+	private String clashWith(net.minecraft.client.KeyMapping key) {
+		if (key.isUnbound()) return null;
+		for (net.minecraft.client.KeyMapping other : minecraft.options.keyMappings) {
+			if (other != key && key.same(other)) {
+				return Component.translatable(other.getName()).getString();
+			}
+		}
+		return null;
+	}
+
+	private void bindListening(com.mojang.blaze3d.platform.InputConstants.Key key) {
+		if (listening == null) return;
+		listening.setKey(key);
+		net.minecraft.client.KeyMapping.resetMapping();
+		minecraft.options.save();
+		listening = null;
 	}
 
 	// ------------------------------------------------------------------ profiles
@@ -2047,82 +2777,82 @@ public final class StudioScreen extends Screen {
 		// a click anywhere outside the list closes it
 		hits.add(new Hit(0, 0, width, height, this::closeProfiles, this::closeProfiles, null, null));
 		List<String> names = new ArrayList<>(config.profiles.keySet());
-		int w = 196, rowH = 14;
-		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 2;
+		int w = compact ? 196 : 212, rowH = compact ? 16 : 18;
+		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 3;
+		int bh = ctl - 2;
 		int hintH = 2 * smallH() + 2;
-		int fixed = 22 + 8 + 4 * 18 + hintH + 6;
+		int fixed = 26 + 8 + 4 * (bh + 4) + hintH + 8;
 		int room = Math.max(rowH * 2, (height - 6 - y - fixed) / rowH * rowH);
 		int listH = Math.min(names.size() * rowH, room);
 		int h = fixed + listH;
-		fill(ctx, x + 3, y + 3, x + w + 3, y + h + 3, 0x66000000);
-		roundRect(ctx, x, y, x + w, y + h, Theme.argb(theme().base, 1f));
-		outline(ctx, x, y, x + w, y + h, pal.accent());
+		int[] lg = shapeLg();
+		// a soft shadow, then the opaque pop-up
+		box(ctx, x + 2, y + 4, x + w + 2, y + h + 4, 0x44000000, 0, lg);
+		box(ctx, x, y, x + w, y + h, 0xFF000000 | Theme.mix(theme().base, 0xFFFFFF, 0.07f), pal.surfaceBorderHover(), lg);
 		hits.add(new Hit(x, y, x + w, y + h, () -> { }, () -> { }, null, null)); // clicks on empty parts do nothing
-		bold(ctx, "Profiles", x + 8, y + 7, TEXT);
+		heading(ctx, "Profiles", x + 10, y + 8, TEXT);
 		String count = names.size() + " saved";
-		small(ctx, count, x + w - 8 - smallW(count), y + 7, MUTED);
-		int listTop = y + 21, listBottom = listTop + listH;
+		small(ctx, count, x + w - 10 - smallW(count), y + 9, MUTED);
+		int listTop = y + 26, listBottom = listTop + listH;
 		int content = names.size() * rowH;
 		int listOff = scrollOf("profiles", content, listH);
 		scrollAreas.add(new ScrollArea("profiles", x, listTop, x + w, listBottom, Math.max(0, content - listH)));
 		ctx.enableScissor(x + 1, listTop, x + w - 1, listBottom);
 		int ry = listTop - listOff;
+		int[] sm = shapeSm();
 		for (String name : names) {
 			boolean active = name.equals(config.activeProfile);
-			boolean hover = inside(mouseX, mouseY, x + 4, Math.max(ry, listTop), x + w - 4, Math.min(ry + rowH, listBottom));
-			if (active) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.soft());
-			else if (hover) roundRect(ctx, x + 4, ry, x + w - 4, ry + rowH, pal.surfaceHover());
-			if (active) drawCheck(ctx, x + 8, ry + 4, pal.accentText());
+			boolean hover = inside(mouseX, mouseY, x + 5, Math.max(ry, listTop), x + w - 5, Math.min(ry + rowH, listBottom));
+			float ht = anim.fade(Anim.key(0x7700, name.hashCode()), hover && !active, 16f);
+			if (active) round(ctx, x + 5, ry, x + w - 5, ry + rowH - 1, pal.soft(), sm);
+			else if (ht > 0.02f) round(ctx, x + 5, ry, x + w - 5, ry + rowH - 1, Anim.mix(0, pal.surfaceHover(), ht), sm);
+			if (active) icon(ctx, Icons.CHECK, x + 10, ry + (rowH - Icons.CHECK.h) / 2 - 1, pal.accentText());
 			StudioConfig.Profile saved = config.profiles.get(name);
 			int n = active ? config.currentCount() : saved == null ? 0 : saved.count();
 			String changes = n == 0 ? "empty" : n + " changed";
 			int cw = smallW(changes);
+			int textY = ry + (rowH - 8) / 2 - 1;
 			if (active && renamingProfile) {
-				profileName.setX(x + 21);
-				profileName.setY(ry + 3);
-				profileName.setWidth(w - 30);
-				outline(ctx, x + 18, ry + 1, x + w - 6, ry + rowH - 1, pal.accent());
+				profileName.setX(x + 24);
+				profileName.setY(textY);
+				profileName.setWidth(w - 36);
+				box(ctx, x + 21, ry, x + w - 8, ry + rowH - 1, pal.surface(), pal.accent(), sm);
 				renameRowShown = ry >= listTop && ry + rowH <= listBottom;
 			} else {
-				text(ctx, trim(name, w - 34 - cw), x + 21, ry + 3, active ? 0xFFFFFFFF : TEXT2);
-				small(ctx, changes, x + w - 9 - cw, ry + 3, MUTED);
+				text(ctx, trim(name, w - 40 - cw), x + 24, textY, active ? WHITE : Anim.mix(TEXT2, WHITE, ht));
+				small(ctx, changes, x + w - 11 - cw, ry + (rowH - smallH()) / 2 - 1 + (pixelFont() ? 0 : 1), active ? pal.accentText() : MUTED);
 			}
 			final String target = name;
 			if (!active) {
-				addHit(x + 4, ry, x + w - 4, ry + rowH, listTop, listBottom, () -> switchProfile(target),
+				addHit(x + 5, ry, x + w - 5, ry + rowH, listTop, listBottom, () -> switchProfile(target),
 					"Switch to " + name + " (applies right away)");
 			}
 			ry += rowH;
 		}
 		ctx.disableScissor();
-		if (content > listH) {
-			// thin scroll bar
-			int barH = Math.max(8, listH * listH / content);
-			int barY = listTop + (listH - barH) * listOff / Math.max(1, content - listH);
-			fill(ctx, x + w - 3, barY, x + w - 2, barY + barH, pal.line2());
-		}
+		scrollBar(ctx, x + w - 1, listTop, listBottom, listOff, Math.max(0, content - listH), false);
 		ry = listBottom;
-		fill(ctx, x + 6, ry + 3, x + w - 6, ry + 4, pal.line2());
+		fill(ctx, x + 8, ry + 3, x + w - 8, ry + 4, pal.line2());
 		ry += 8;
-		int bw = (w - 20) / 2;
-		int b2 = x + 8 + bw + 4;
-		button(ctx, x + 8, ry, bw, 15, "New", false, false, mouseX, mouseY, () -> newProfile(false), "Start an empty profile");
-		button(ctx, b2, ry, bw, 15, "Duplicate", false, false, mouseX, mouseY, () -> newProfile(true), "Copy this profile");
-		ry += 18;
-		button(ctx, x + 8, ry, bw, 15, "Rename", false, false, mouseX, mouseY, this::startRename, "Rename this profile");
+		int bw = (w - 24) / 2;
+		int b2 = x + 10 + bw + 4;
+		button(ctx, x + 10, ry, bw, bh, "New", Icons.PLUS, BTN_NORMAL, mouseX, mouseY, () -> newProfile(false), "Start an empty profile");
+		button(ctx, b2, ry, bw, bh, "Duplicate", Icons.COPY, BTN_NORMAL, mouseX, mouseY, () -> newProfile(true), "Copy this profile");
+		ry += bh + 4;
+		button(ctx, x + 10, ry, bw, bh, "Rename", Icons.PENCIL, BTN_NORMAL, mouseX, mouseY, this::startRename, "Rename this profile");
 		boolean armed = System.currentTimeMillis() < deleteArmedUntil;
-		button(ctx, b2, ry, bw, 15, armed ? "Sure?" : "Delete", armed, false, mouseX, mouseY, this::deleteProfile,
+		button(ctx, b2, ry, bw, bh, armed ? "Sure?" : "Delete", Icons.TRASH, armed ? BTN_DANGER : BTN_NORMAL, mouseX, mouseY, this::deleteProfile,
 			names.size() > 1 ? "Delete this profile" : "You need at least one profile");
-		ry += 18;
-		button(ctx, x + 8, ry, bw, 15, "Copy code", false, false, mouseX, mouseY, this::copyProfileCode,
+		ry += bh + 4;
+		button(ctx, x + 10, ry, bw, bh, "Copy code", Icons.COPY, BTN_NORMAL, mouseX, mouseY, this::copyProfileCode,
 			"Copy a code for this profile to send to a friend");
-		button(ctx, b2, ry, bw, 15, "Paste code", false, false, mouseX, mouseY, this::pasteProfileCode,
+		button(ctx, b2, ry, bw, bh, "Paste code", Icons.PASTE, BTN_NORMAL, mouseX, mouseY, this::pasteProfileCode,
 			"Add a profile from a code you copied");
-		ry += 18;
-		button(ctx, x + 8, ry, w - 16, 15, "Export as pack", false, true, mouseX, mouseY, this::exportPack,
+		ry += bh + 4;
+		button(ctx, x + 10, ry, w - 20, bh, "Export as pack", Icons.EXPORT, BTN_SOFT, mouseX, mouseY, this::exportPack,
 			"Save this profile as a normal resource pack zip that works without the mod");
-		ry += 20;
-		smallWrapped(ctx, "Switch in game with the Next profile key (set it in Keybinds).", x + 8, ry, w - 16, MUTED);
+		ry += bh + 6;
+		smallWrapped(ctx, "Switch in game with the Next profile key (set it in Settings > General).", x + 10, ry, w - 20, MUTED);
 	}
 
 	private void exportPack() {
@@ -2270,66 +3000,81 @@ public final class StudioScreen extends Screen {
 	}
 
 	private void drawFooter(GuiGraphicsExtractor ctx, int mouseX, int mouseY) {
+		bandBottom(ctx, px, footerY, px + pw, py + ph, pal.header(), shapeLg());
 		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, pal.line());
-		int y = footerY + 5;
+		int y = footerY + (footerH - ctl) / 2 + 0;
+		int textY = y + (ctl - 8) / 2;
 		int right = px + pw - 8;
 
+		// Apply: the main action. A pulse around it while changes are waiting.
 		String applyLabel = "Apply changes";
-		int pillW = pending > 0 ? textW(String.valueOf(pending)) + 8 : 0;
-		int aw = textW(applyLabel) + 16 + (pending > 0 ? pillW + 6 : 0);
+		String pendingText = pending > 0 ? String.valueOf(pending) : null;
+		int pillW = pendingText != null ? textW(pendingText) + 9 : 0;
+		int aw = boldW(applyLabel) + 18 + (pending > 0 ? pillW + 6 : 0);
 		right -= aw;
-		boolean aHover = inside(mouseX, mouseY, right, y, right + aw, y + 16);
-		roundRect(ctx, right, y, right + aw, y + 16, aHover ? pal.strongHover() : pal.strong());
-		bold(ctx, applyLabel, right + 8, y + 4, 0xFFFFFFFF);
-		if (pending > 0) {
-			int pxl = right + 8 + textW(applyLabel) + 6;
-			roundRect(ctx, pxl, y + 3, pxl + pillW, y + 13, 0x38FFFFFF);
-			text(ctx, String.valueOf(pending), pxl + 4, y + 4, 0xFFFFFFFF);
+		boolean aHover = hot(mouseX, mouseY, right, y, right + aw, y + ctl);
+		boolean aDown = pressed(right, y, right + aw, y + ctl);
+		float at = anim.fade(Anim.key(0x7800, 0), aHover, 16f);
+		if (pending > 0 && !applying) {
+			float pulse = config.animations ? (float) (0.5 + 0.5 * Math.sin(clock * 4)) : 0.6f;
+			box(ctx, right - 2, y - 2, right + aw + 2, y + ctl + 2, 0, Theme.argb(pal.accent() & 0xFFFFFF, 0.15f + 0.35f * pulse), shapeSm());
 		}
-		hits.add(new Hit(right, y, right + aw, y + 16, this::apply, null, "Build the pack and reload textures", null));
+		round(ctx, right, y, right + aw, y + ctl, aDown ? pal.strongPressed() : Anim.mix(pal.strong(), pal.strongHover(), at), shapeSm());
+		bold(ctx, applyLabel, right + 9, textY + (aDown ? 1 : 0), WHITE);
+		if (pendingText != null) {
+			int pxl = right + 9 + boldW(applyLabel) + 6;
+			round(ctx, pxl, y + (ctl - 12) / 2, pxl + pillW, y + (ctl - 12) / 2 + 12, 0x40FFFFFF, shapePill(12));
+			text(ctx, pendingText, pxl + 4, textY, WHITE);
+		}
+		hits.add(new Hit(right, y, right + aw, y + ctl, this::apply, null, "Build the pack and reload textures (Ctrl+S)", null));
+		right -= 10;
 
 		// auto-apply switch
-		String auto = "Auto-apply";
-		int sw = 18 + 5 + textW(auto);
-		right -= sw + 12;
-		int trackY = y + 3;
-		roundRect(ctx, right, trackY, right + 18, trackY + 10, config.applyInstantly ? pal.strong() : pal.line2());
-		int knobX = config.applyInstantly ? right + 9 : right + 1;
-		roundRect(ctx, knobX, trackY + 1, knobX + 8, trackY + 9, 0xFFFFFFFF);
-		text(ctx, auto, right + 23, y + 4, TEXT2);
-		hits.add(new Hit(right, y, right + sw, y + 16, () -> {
+		boolean short1 = pw < 540;
+		String auto = short1 ? "Auto" : "Auto-apply";
+		int sw = 20 + 6 + textW(auto);
+		right -= sw;
+		boolean autoHover = hot(mouseX, mouseY, right - 3, y, right + sw + 3, y + ctl);
+		float tt = anim.fade(Anim.key(0x7801, 0), autoHover, 16f);
+		round(ctx, right - 4, y, right + sw + 3, y + ctl, Anim.mix(0, pal.surface(), tt), shapeSm());
+		drawSwitch(ctx, right, y + (ctl - 10) / 2, config.applyInstantly, Anim.key(0x7802, 0));
+		text(ctx, auto, right + 26, textY, Anim.mix(TEXT2, WHITE, tt));
+		hits.add(new Hit(right - 4, y, right + sw + 3, y + ctl, () -> {
 			config.applyInstantly = !config.applyInstantly;
 			config.save();
 			if (config.applyInstantly && pending > 0) apply();
 		}, null, "Apply every change right away (each one reloads textures)", null));
+		right -= 10;
+		fill(ctx, right, y + 3, right + 1, y + ctl - 3, pal.line2());
 		right -= 8;
-		fill(ctx, right, y + 2, right + 1, y + 14, pal.line2());
 
-		boolean small = pw < 520;
-		String undoLabel = "Undo";
-		int uw = textW(undoLabel) + 12;
-		right -= uw + 6;
-		flatButton(ctx, right, y, uw, 16, undoLabel, mouseX, mouseY, this::undo, "Undo the last change (Ctrl+Z)");
-		String rescan = "Rescan";
-		int rw = textW(rescan) + 12;
-		right -= rw + 2;
-		flatButton(ctx, right, y, rw, 16, rescan, mouseX, mouseY, this::rescan, "Look for new packs in the resourcepacks folder");
-		String folder = small ? "Folder" : "Packs folder";
-		int fw = textW(folder) + 12;
-		right -= fw + 2;
-		flatButton(ctx, right, y, fw, 16, folder, mouseX, mouseY,
-			() -> Util.getPlatform().openUri(minecraft.getResourcePackDirectory().toUri()), "Open your resourcepacks folder");
+		// Undo, rescan and the folder: names when there is room, icons when there isn't
+		boolean names = pw >= 640;
+		String[] labels = {"Undo", "Rescan", names && pw >= 720 ? "Packs folder" : "Folder"};
+		Icons[] icons = {Icons.UNDO, Icons.REFRESH, Icons.FOLDER};
+		Runnable[] actions = {this::undo, this::rescan, () -> Util.getPlatform().openUri(minecraft.getResourcePackDirectory().toUri())};
+		String[] tips = {"Undo the last change (Ctrl+Z)", "Look for new packs in the resourcepacks folder", "Open your resourcepacks folder"};
+		for (int i = 0; i < 3; i++) {
+			int bw = names ? buttonW(labels[i], icons[i]) : ctl;
+			right -= bw;
+			button(ctx, right, y, bw, ctl, names ? labels[i] : null, icons[i], BTN_FLAT, mouseX, mouseY, actions[i], tips[i]);
+			right -= 2;
+		}
 
+		// status
 		int sx = px + 12;
-		roundRect(ctx, sx, y + 5, sx + 5, y + 10, statusColor == WARN ? WARN : statusColor == GOOD ? GOOD : MUTED);
+		boolean busy = applying || (loading != null && !loading.isDone());
+		int dot = statusColor == WARN ? WARN : statusColor == GOOD ? GOOD : MUTED;
+		if (busy) dot = Anim.mix(MUTED, pal.accentText(), (float) (0.5 + 0.5 * Math.sin(clock * 7)));
+		round(ctx, sx, y + (ctl - 6) / 2, sx + 6, y + (ctl - 6) / 2 + 6, dot, shapePill(6));
 		String found = index != null ? "  -  " + index.packs().size() + " packs found" : "";
-		int room = right - sx - 14;
+		int room = right - sx - 18;
 		if (room > 20) {
 			String st = trim(status, room);
-			text(ctx, st, sx + 10, y + 4, statusColor == MUTED ? TEXT2 : statusColor);
+			text(ctx, st, sx + 12, textY, statusColor == MUTED ? TEXT2 : statusColor);
 			int used = textW(st);
 			if (!found.isEmpty() && used + textW(found) < room) {
-				text(ctx, found, sx + 10 + used, y + 4, MUTED);
+				text(ctx, found, sx + 12 + used, textY, MUTED);
 			}
 		}
 	}
@@ -2393,85 +3138,337 @@ public final class StudioScreen extends Screen {
 
 	// ------------------------------------------------------------------ small drawing helpers
 
-	private void button(GuiGraphicsExtractor ctx, int x, int y, int w, int h, String label, boolean primary, boolean outlined,
+	private static final int[] CORNERS_NONE = {};
+	/** Rows cut from the top and bottom, as how many pixels each row is pulled in from the sides. */
+	private static final int[] CORNERS_1 = {1};
+	private static final int[] CORNERS_2 = {2, 1};
+	private static final int[] CORNERS_3 = {3, 1, 1};
+
+	/** Corners of buttons, chips and inputs. */
+	private int[] shapeSm() {
+		return config.corners == 0 ? CORNERS_NONE : config.corners == 1 ? CORNERS_1 : CORNERS_2;
+	}
+
+	/** Corners of cards, panels and pop-ups: one step rounder than the small ones. */
+	private int[] shapeLg() {
+		return config.corners == 0 ? CORNERS_NONE : config.corners == 1 ? CORNERS_2 : CORNERS_3;
+	}
+
+	/** Fully rounded ends for switches, slider knobs and tracks of this height. */
+	private int[] shapePill(int h) {
+		if (config.corners == 0) return CORNERS_NONE;
+		return h <= 5 ? CORNERS_1 : h <= 9 ? CORNERS_2 : CORNERS_3;
+	}
+
+	private static void fill(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
+		if (x2 > x1 && y2 > y1 && (color >>> 24) != 0) ctx.fill(x1, y1, x2, y2, color);
+	}
+
+	/** Filled rectangle with rounded corners, drawn without overlapping fills so see-through colours stay even. */
+	private static void round(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color, int[] shape) {
+		int k = shape.length;
+		if ((color >>> 24) == 0) return;
+		if (k == 0 || x2 - x1 < 2 * k + 1 || y2 - y1 < 2 * k + 1) {
+			fill(ctx, x1, y1, x2, y2, color);
+			return;
+		}
+		int r = 0;
+		while (r < k) {
+			// rows that are pulled in by the same amount are one fill
+			int end = r + 1;
+			while (end < k && shape[end] == shape[r]) end++;
+			fill(ctx, x1 + shape[r], y1 + r, x2 - shape[r], y1 + end, color);
+			fill(ctx, x1 + shape[r], y2 - end, x2 - shape[r], y2 - r, color);
+			r = end;
+		}
+		fill(ctx, x1, y1 + k, x2, y2 - k, color);
+	}
+
+	/**
+	 * Rounded box with a 1px border. The border and the inside never overlap, so a see-through fill and a
+	 * see-through border each keep their own colour. Pass 0 for either to leave it out.
+	 */
+	private static void box(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int fillColor, int border, int[] shape) {
+		int k = shape.length;
+		int w = x2 - x1, h = y2 - y1;
+		if (k == 0 || w < 2 * k + 3 || h < 2 * k + 3) {
+			fill(ctx, x1, y1, x2, y1 + 1, border);
+			fill(ctx, x1, y2 - 1, x2, y2, border);
+			fill(ctx, x1, y1 + 1, x1 + 1, y2 - 1, border);
+			fill(ctx, x2 - 1, y1 + 1, x2, y2 - 1, border);
+			fill(ctx, x1 + 1, y1 + 1, x2 - 1, y2 - 1, fillColor);
+			return;
+		}
+		int in0 = shape[0];
+		fill(ctx, x1 + in0, y1, x2 - in0, y1 + 1, border);
+		fill(ctx, x1 + in0, y2 - 1, x2 - in0, y2, border);
+		for (int r = 1; r < k; r++) {
+			int in = shape[r];
+			int s = Math.max(in + 1, shape[r - 1]);
+			fill(ctx, x1 + in, y1 + r, x1 + s, y1 + r + 1, border);
+			fill(ctx, x2 - s, y1 + r, x2 - in, y1 + r + 1, border);
+			fill(ctx, x1 + s, y1 + r, x2 - s, y1 + r + 1, fillColor);
+			fill(ctx, x1 + in, y2 - r - 1, x1 + s, y2 - r, border);
+			fill(ctx, x2 - s, y2 - r - 1, x2 - in, y2 - r, border);
+			fill(ctx, x1 + s, y2 - r - 1, x2 - s, y2 - r, fillColor);
+		}
+		int top = Math.max(k, 1);
+		fill(ctx, x1, y1 + top, x1 + 1, y2 - top, border);
+		fill(ctx, x2 - 1, y1 + top, x2, y2 - top, border);
+		fill(ctx, x1 + 1, y1 + top, x2 - 1, y2 - top, fillColor);
+	}
+
+	/** A band across the top of a rounded box (the header), inside its 1px border. */
+	private static void bandTop(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color, int[] shape) {
+		int k = shape.length;
+		for (int r = 1; r < k && y1 + r < y2; r++) {
+			int s = Math.max(shape[r] + 1, shape[r - 1]);
+			fill(ctx, x1 + s, y1 + r, x2 - s, y1 + r + 1, color);
+		}
+		fill(ctx, x1 + 1, y1 + Math.max(k, 1), x2 - 1, y2, color);
+	}
+
+	/** A band along the bottom of a rounded box (the footer), inside its 1px border. */
+	private static void bandBottom(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color, int[] shape) {
+		int k = shape.length;
+		for (int r = 1; r < k && y2 - r - 1 >= y1; r++) {
+			int s = Math.max(shape[r] + 1, shape[r - 1]);
+			fill(ctx, x1 + s, y2 - r - 1, x2 - s, y2 - r, color);
+		}
+		fill(ctx, x1 + 1, y1, x2 - 1, y2 - Math.max(k, 1), color);
+	}
+
+	/** A soft shadow under something that floats (a hovered card, a pop-up). */
+	private static void dropShadow(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int strength) {
+		int a1 = Math.min(255, strength), a2 = Math.min(255, strength / 2);
+		fill(ctx, x1 + 2, y2, x2 - 2, y2 + 1, a1 << 24);
+		fill(ctx, x1 + 3, y2 + 1, x2 - 3, y2 + 2, a2 << 24);
+	}
+
+	private static boolean inside(double x, double y, int x1, int y1, int x2, int y2) {
+		return x >= x1 && x < x2 && y >= y1 && y < y2;
+	}
+
+	/** Under the pop-up the menu doesn't react to the mouse: set while everything below the profile list is drawn. */
+	private boolean hoverBlocked;
+
+	/** The mouse is over this area and nothing (a drag, the profile list) takes the hover away. */
+	private boolean hot(double mouseX, double mouseY, int x1, int y1, int x2, int y2) {
+		return !hoverBlocked && dragging == null && inside(mouseX, mouseY, x1, y1, x2, y2);
+	}
+
+	/** Draws a pixel icon with its top-left corner at x, y. */
+	private static void icon(GuiGraphicsExtractor ctx, Icons ic, int x, int y, int color) {
+		int[] r = ic.rects;
+		for (int i = 0; i < r.length; i += 4) fill(ctx, x + r[i], y + r[i + 1], x + r[i + 2], y + r[i + 3], color);
+	}
+
+	/** An icon centred in a box. */
+	private static void iconIn(GuiGraphicsExtractor ctx, Icons ic, int x1, int y1, int x2, int y2, int color) {
+		icon(ctx, ic, x1 + (x2 - x1 - ic.w) / 2, y1 + (y2 - y1 - ic.h) / 2, color);
+	}
+
+	private int fadeKey(String label, int x) {
+		return Anim.key(label.hashCode(), x);
+	}
+
+	/** True while the mouse button is held down on exactly this rectangle. */
+	private boolean pressed(int x1, int y1, int x2, int y2) {
+		return mouseDown && pressX1 == x1 && pressY1 == y1 && pressX2 == x2 && pressY2 == y2;
+	}
+
+	private static final int BTN_PRIMARY = 0, BTN_NORMAL = 1, BTN_FLAT = 2, BTN_SOFT = 3, BTN_DANGER = 4;
+
+	/** Width a button needs for its label and optional icon. */
+	private int buttonW(String label, Icons ic) {
+		return (label == null ? 0 : textW(label)) + (ic == null ? 0 : ic.w + (label == null ? 0 : 4)) + 12;
+	}
+
+	/**
+	 * The one button of the menu. Styles: primary (solid accent), normal (raised), flat (no background until the
+	 * mouse is over it) and soft (accent tint, for a switched-on toggle).
+	 */
+	private void button(GuiGraphicsExtractor ctx, int x, int y, int w, int h, String label, Icons ic, int style,
 	                    int mouseX, int mouseY, Runnable action, String tooltip) {
-		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + h);
-		int bg = primary ? (hover ? pal.strongHover() : pal.strong()) : outlined ? pal.cardOn() : (hover ? pal.surfaceHover() : pal.surface());
-		roundRect(ctx, x, y, x + w, y + h, bg);
-		if (!primary) outline(ctx, x, y, x + w, y + h, outlined ? pal.accent() : pal.surfaceBorder());
-		int tw = textW(label);
-		text(ctx, label, x + (w - tw) / 2, y + (h - 8) / 2, primary ? 0xFFFFFFFF : outlined ? pal.accentText() : TEXT);
+		boolean hover = hot(mouseX, mouseY, x, y, x + w, y + h);
+		boolean down = pressed(x, y, x + w, y + h);
+		float t = anim.fade(fadeKey(label == null ? "icon" + ic : label, x), hover, 16f);
+		int bg, border, fg;
+		switch (style) {
+			case BTN_PRIMARY -> {
+				bg = down ? pal.strongPressed() : Anim.mix(pal.strong(), pal.strongHover(), t);
+				border = 0;
+				fg = WHITE;
+			}
+			case BTN_FLAT -> {
+				bg = down ? pal.surfacePressed() : Anim.mix(0, pal.surfaceHover(), t);
+				border = 0;
+				fg = Anim.mix(TEXT2, WHITE, t);
+			}
+			case BTN_DANGER -> {
+				bg = down ? 0x88B0323B : Anim.mix(0x66D6454F, 0x88D6454F, t);
+				border = 0xFFE5646E;
+				fg = WHITE;
+			}
+			case BTN_SOFT -> {
+				bg = down ? pal.soft() : Anim.mix(pal.soft(), pal.softHover(), t);
+				border = Anim.mix(Theme.argb(pal.accent() & 0xFFFFFF, 0.55f), pal.accent(), t);
+				fg = pal.accentText();
+			}
+			default -> {
+				bg = down ? pal.surfacePressed() : Anim.mix(pal.surface(), pal.surfaceHover(), t);
+				border = Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), t);
+				fg = Anim.mix(TEXT, WHITE, t);
+			}
+		}
+		box(ctx, x, y, x + w, y + h, bg, border, shapeSm());
+		int tw = label == null ? 0 : textW(label);
+		int iw = ic == null ? 0 : ic.w + (label == null ? 0 : 4);
+		int cx = x + (w - tw - iw) / 2;
+		int ty = y + (h - 8) / 2 + (down ? 1 : 0);
+		if (ic != null) {
+			icon(ctx, ic, cx, y + (h - ic.h) / 2 + (down ? 1 : 0), fg);
+			cx += ic.w + 4;
+		}
+		if (label != null) text(ctx, label, cx, ty, fg);
 		hits.add(new Hit(x, y, x + w, y + h, action, null, tooltip, null));
 	}
 
-	private void flatButton(GuiGraphicsExtractor ctx, int x, int y, int w, int h, String label, int mouseX, int mouseY,
+	/** A square button with just an icon. */
+	private void iconButton(GuiGraphicsExtractor ctx, int x, int y, int size, Icons ic, boolean on, int mouseX, int mouseY,
 	                        Runnable action, String tooltip) {
-		boolean hover = inside(mouseX, mouseY, x, y, x + w, y + h);
-		if (hover) roundRect(ctx, x, y, x + w, y + h, pal.surfaceHover());
-		text(ctx, label, x + 6, y + 4, hover ? 0xFFFFFFFF : TEXT2);
-		hits.add(new Hit(x, y, x + w, y + h, action, null, tooltip, null));
+		boolean hover = hot(mouseX, mouseY, x, y, x + size, y + size);
+		boolean down = pressed(x, y, x + size, y + size);
+		float t = anim.fade(Anim.key(ic.ordinal(), x), hover, 16f);
+		int bg = on ? (down ? pal.strongPressed() : pal.strong())
+			: down ? pal.surfacePressed() : Anim.mix(pal.surface(), pal.surfaceHover(), t);
+		int border = on ? 0 : Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), t);
+		box(ctx, x, y, x + size, y + size, bg, border, shapeSm());
+		iconIn(ctx, ic, x, y + (down ? 1 : 0), x + size, y + size + (down ? 1 : 0), on ? WHITE : Anim.mix(TEXT2, WHITE, t));
+		hits.add(new Hit(x, y, x + size, y + size, action, null, tooltip, null));
 	}
 
-	private void iconButton(GuiGraphicsExtractor ctx, int x, int y, String tooltip, int mouseX, int mouseY, boolean on, Runnable action) {
-		boolean hover = inside(mouseX, mouseY, x, y, x + 16, y + 16);
-		roundRect(ctx, x, y, x + 16, y + 16, on ? pal.strong() : hover ? pal.surfaceHover() : pal.surface());
-		if (!on) outline(ctx, x, y, x + 16, y + 16, pal.surfaceBorder());
-		hits.add(new Hit(x, y, x + 16, y + 16, action, null, tooltip, null));
+	/** A text input frame: the actual text box is drawn by the game on top of it. */
+	private void inputFrame(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, boolean focused, boolean hover, int key) {
+		float t = anim.fade(key, focused, 14f);
+		float h = anim.fade(key + 1, hover && !focused, 14f);
+		int bg = Anim.mix(Anim.mix(pal.surface(), pal.surfaceHover(), h), pal.surfaceHover(), t);
+		int border = Anim.mix(Anim.mix(pal.surfaceBorder(), pal.surfaceBorderHover(), h), pal.accent(), t);
+		box(ctx, x1, y1, x2, y2, bg, border, shapeSm());
+	}
+
+	/** An on/off switch, 20 x 10. The knob slides. */
+	private void drawSwitch(GuiGraphicsExtractor ctx, int x, int y, boolean on, int key) {
+		float t = anim.fade(key, on, 16f);
+		round(ctx, x, y, x + 20, y + 10, Anim.mix(pal.line2(), pal.strong(), t), shapePill(10));
+		int kx = x + 1 + Math.round(t * 10);
+		round(ctx, kx, y + 1, kx + 8, y + 9, Anim.mix(0xFFB8BDD0, WHITE, t), shapePill(8));
+	}
+
+	/** A row with a label on the left and a switch on the right; the whole row is clickable. */
+	private int switchRow(GuiGraphicsExtractor ctx, String label, String hint, boolean on, int x1, int x2, int y, int mouseX, int mouseY,
+	                      Runnable action, String tooltip) {
+		int hintH = hint == null ? 0 : smallWrappedHeight(hint, x2 - x1);
+		int h = 16 + hintH;
+		boolean hover = hot(mouseX, mouseY, x1 - 3, y - 2, x2 + 3, y + h);
+		float t = anim.fade(fadeKey(label, x1), hover, 14f);
+		round(ctx, x1 - 3, y - 2, x2 + 3, y + h, Anim.mix(0, pal.surface(), t), shapeSm());
+		text(ctx, trim(label, x2 - x1 - 26), x1, y + 2, Anim.mix(TEXT2, WHITE, t));
+		drawSwitch(ctx, x2 - 20, y + 1, on, fadeKey(label, x1) + 7);
+		if (hint != null) smallWrapped(ctx, hint, x1, y + 14, x2 - x1, MUTED);
+		hits.add(new Hit(x1 - 3, y - 2, x2 + 3, y + h, action, null, tooltip, null));
+		return y + h + 3;
+	}
+
+	/**
+	 * A row of choices where one is selected; the highlight slides to the new choice. Returns nothing: it draws
+	 * into the box x, y, w, h. labels[i] may be null for an icon-only choice (icons[i] then shows).
+	 */
+	private void segmented(GuiGraphicsExtractor ctx, int key, int x, int y, int w, int h, String[] labels, Icons[] icons, int[] widths,
+	                       int selected, int mouseX, int mouseY, java.util.function.IntConsumer onSelect, String[] tooltips) {
+		int n = labels.length;
+		box(ctx, x, y, x + w, y + h, pal.surface(), pal.surfaceBorder(), shapeSm());
+		int inner = w - 4;
+		int[] xs = new int[n + 1];
+		int total = 0;
+		if (widths == null) {
+			for (int i = 0; i < n; i++) xs[i] = x + 2 + inner * i / n;
+			xs[n] = x + 2 + inner;
+		} else {
+			for (int i = 0; i < n; i++) total += widths[i];
+			int acc = 0;
+			for (int i = 0; i < n; i++) {
+				xs[i] = x + 2 + inner * acc / Math.max(1, total);
+				acc += widths[i];
+			}
+			xs[n] = x + 2 + inner;
+		}
+		float ax1 = anim.to(Anim.key(key, 1000), xs[selected], 16f);
+		float ax2 = anim.to(Anim.key(key, 1001), xs[selected + 1], 16f);
+		round(ctx, Math.round(ax1), y + 2, Math.round(ax2), y + h - 2, pal.soft(), shapeSm());
+		for (int i = 0; i < n; i++) {
+			int sx1 = xs[i], sx2 = xs[i + 1];
+			boolean on = i == selected;
+			boolean hover = hot(mouseX, mouseY, sx1, y, sx2, y + h);
+			float t = anim.fade(Anim.key(key, i + 2), hover && !on, 16f);
+			int color = on ? WHITE : Anim.mix(MUTED, TEXT, t);
+			if (!on && t > 0.01f) round(ctx, sx1, y + 2, sx2, y + h - 2, Anim.mix(0, pal.surface(), t), shapeSm());
+			String label = labels[i];
+			Icons ic = icons == null ? null : icons[i];
+			int lw = label == null ? 0 : textW(label);
+			int iw = ic == null ? 0 : ic.w + (label == null ? 0 : 3);
+			int cx = sx1 + (sx2 - sx1 - lw - iw) / 2;
+			if (ic != null) {
+				icon(ctx, ic, cx, y + (h - ic.h) / 2, on ? pal.accentText() : color);
+				cx += ic.w + 3;
+			}
+			if (label != null) text(ctx, label, cx, y + (h - 8) / 2, color);
+			final int choice = i;
+			hits.add(new Hit(sx1, y, sx2, y + h, () -> onSelect.accept(choice), null, tooltips == null ? null : tooltips[i], null));
+		}
 	}
 
 	/** Three dots that light up in turn, for pictures still being made. */
 	private void drawLoading(GuiGraphicsExtractor ctx, int cx, int cy) {
-		int lit = (int) (System.currentTimeMillis() / 250 % 3);
+		int lit = (int) (clock * 4) % 3;
 		for (int i = 0; i < 3; i++) {
 			int dx = cx - 6 + i * 5;
 			fill(ctx, dx, cy - 1, dx + 3, cy + 2, i == lit ? pal.accentText() : pal.line2());
 		}
 	}
 
-	private static void drawSearchIcon(GuiGraphicsExtractor ctx, int x, int y, int color) {
-		fill(ctx, x + 1, y, x + 5, y + 1, color);
-		fill(ctx, x + 1, y + 5, x + 5, y + 6, color);
-		fill(ctx, x, y + 1, x + 1, y + 5, color);
-		fill(ctx, x + 5, y + 1, x + 6, y + 5, color);
-		fill(ctx, x + 5, y + 5, x + 6, y + 6, color);
-		fill(ctx, x + 6, y + 6, x + 7, y + 7, color);
-		fill(ctx, x + 7, y + 7, x + 8, y + 8, color);
+	/** A thin scroll bar along the right edge of a scrolling area, only when there is more to see. */
+	private void scrollBar(GuiGraphicsExtractor ctx, int x2, int y1, int y2, int offset, int max, boolean active) {
+		if (max <= 0) return;
+		int view = y2 - y1;
+		int thumb = Math.max(10, view * view / (view + max));
+		int ty = y1 + (view - thumb) * offset / max;
+		round(ctx, x2 - 3, ty, x2 - 1, ty + thumb, active ? Theme.argb(pal.accentText() & 0xFFFFFF, 0.6f) : 0x40FFFFFF, CORNERS_1);
 	}
 
-	private static void drawCross(GuiGraphicsExtractor ctx, int x, int y, int color) {
-		for (int i = 0; i < 6; i++) {
-			fill(ctx, x + i, y + i, x + i + 1, y + i + 1, color);
-			fill(ctx, x + 5 - i, y + i, x + 6 - i, y + i + 1, color);
+	/** A small round number badge ("3 items changed" and the like). */
+	private int badge(GuiGraphicsExtractor ctx, String s, int x, int y, int h, int bg, int fg) {
+		int w = textW(s) + 8;
+		round(ctx, x, y, x + w, y + h, bg, shapePill(h));
+		text(ctx, s, x + 4, y + (h - 8) / 2, fg);
+		return w;
+	}
+
+	/** A heading for a group of controls: small caps-style text and a hairline that runs to the right edge. */
+	private int section(GuiGraphicsExtractor ctx, String title, String rightText, int x1, int x2, int y) {
+		String caps = title.toUpperCase(Locale.ROOT);
+		small(ctx, caps, x1, y, MUTED);
+		int tx = x1 + smallW(caps) + 5;
+		int end = x2;
+		if (rightText != null) {
+			int rw = smallW(rightText);
+			small(ctx, rightText, x2 - rw, y, pal.accentText());
+			end = x2 - rw - 5;
 		}
+		if (end > tx) fill(ctx, tx, y + smallH() / 2 - 1, end, y + smallH() / 2, pal.line());
+		return y + smallH() + 4;
 	}
 
-	private static void drawGear(GuiGraphicsExtractor ctx, int x, int y, int color) {
-		fill(ctx, x + 2, y + 1, x + 6, y + 7, color);
-		fill(ctx, x + 1, y + 2, x + 7, y + 6, color);
-		fill(ctx, x + 3, y, x + 5, y + 8, color);
-		fill(ctx, x, y + 3, x + 8, y + 5, color);
-		fill(ctx, x + 3, y + 3, x + 5, y + 5, 0xFF101010);
-	}
-
-	private static void drawCheck(GuiGraphicsExtractor ctx, int x, int y, int color) {
-		fill(ctx, x, y + 2, x + 1, y + 3, color);
-		fill(ctx, x + 1, y + 3, x + 2, y + 4, color);
-		fill(ctx, x + 2, y + 4, x + 3, y + 5, color);
-		fill(ctx, x + 3, y + 3, x + 4, y + 4, color);
-		fill(ctx, x + 4, y + 2, x + 5, y + 3, color);
-		fill(ctx, x + 5, y + 1, x + 6, y + 2, color);
-	}
-
-	private static void drawStar(GuiGraphicsExtractor ctx, int x, int y, int color) {
-		fill(ctx, x + 2, y, x + 3, y + 1, color);
-		fill(ctx, x + 1, y + 1, x + 4, y + 2, color);
-		fill(ctx, x, y + 2, x + 5, y + 3, color);
-		fill(ctx, x + 1, y + 3, x + 4, y + 4, color);
-		fill(ctx, x, y + 4, x + 2, y + 5, color);
-		fill(ctx, x + 3, y + 4, x + 5, y + 5, color);
-	}
-
-	/** Adds a click area clipped to a scrolling region's visible part. */
 	/** Cuts the click areas added since index first down to a scrolled panel's visible part. */
 	private void clipHits(int first, int top, int bottom) {
 		for (int i = hits.size() - 1; i >= first; i--) {
@@ -2482,6 +3479,7 @@ public final class StudioScreen extends Screen {
 		}
 	}
 
+	/** Adds a click area clipped to a scrolling region's visible part. */
 	private void addHit(int x1, int y1, int x2, int y2, int clipTop, int clipBottom, Runnable action, Runnable right, String tooltip) {
 		int top = Math.max(y1, clipTop);
 		int bottom = Math.min(y2, clipBottom);
@@ -2493,50 +3491,53 @@ public final class StudioScreen extends Screen {
 		addHit(x1, y1, x2, y2, clipTop, clipBottom, action, null, tooltip);
 	}
 
+	/**
+	 * Where a scrolling area is drawn: it eases toward the target the wheel set. Returns whole pixels so text
+	 * and pictures stay sharp.
+	 */
 	private int scrollOf(String key, int content, int view) {
 		int max = Math.max(0, content - view);
-		int value = Math.max(0, Math.min(max, scroll.getOrDefault(key, 0)));
-		scroll.put(key, value);
-		return value;
-	}
-
-	private static boolean inside(double x, double y, int x1, int y1, int x2, int y2) {
-		return x >= x1 && x < x2 && y >= y1 && y < y2;
-	}
-
-	private static void fill(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
-		if (x2 > x1 && y2 > y1) ctx.fill(x1, y1, x2, y2, color);
-	}
-
-	/** Rectangle with 2px cut corners, drawn without overlapping fills so see-through colours stay even. */
-	private static void roundRect(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
-		if (x2 - x1 < 5 || y2 - y1 < 5) {
-			fill(ctx, x1, y1, x2, y2, color);
-			return;
+		int target = Math.max(0, Math.min(max, scroll.getOrDefault(key, 0)));
+		scroll.put(key, target);
+		float shown = scrollShown.getOrDefault(key, (float) target);
+		if (!config.animations || Math.abs(target - shown) < 0.5f) {
+			shown = target;
+		} else {
+			shown += (target - shown) * (1f - (float) Math.exp(-18f * dt));
 		}
-		fill(ctx, x1 + 2, y1, x2 - 2, y1 + 1, color);
-		fill(ctx, x1 + 1, y1 + 1, x2 - 1, y1 + 2, color);
-		fill(ctx, x1, y1 + 2, x2, y2 - 2, color);
-		fill(ctx, x1 + 1, y2 - 2, x2 - 1, y2 - 1, color);
-		fill(ctx, x1 + 2, y2 - 1, x2 - 2, y2, color);
+		shown = Math.max(0f, Math.min(max, shown));
+		scrollShown.put(key, shown);
+		return Math.round(shown);
 	}
 
-	private static void outline(GuiGraphicsExtractor ctx, int x1, int y1, int x2, int y2, int color) {
-		fill(ctx, x1 + 2, y1, x2 - 2, y1 + 1, color);
-		fill(ctx, x1 + 2, y2 - 1, x2 - 2, y2, color);
-		fill(ctx, x1, y1 + 2, x1 + 1, y2 - 2, color);
-		fill(ctx, x2 - 1, y1 + 2, x2, y2 - 2, color);
-		fill(ctx, x1 + 1, y1 + 1, x1 + 2, y1 + 2, color);
-		fill(ctx, x2 - 2, y1 + 1, x2 - 1, y1 + 2, color);
-		fill(ctx, x1 + 1, y2 - 2, x1 + 2, y2 - 1, color);
-		fill(ctx, x2 - 2, y2 - 2, x2 - 1, y2 - 1, color);
+	/** Sets a scroll position that is shown at once, with no easing. */
+	private void jumpScroll(String key, int value) {
+		scroll.put(key, value);
+		scrollShown.put(key, (float) value);
+	}
+
+	private void resetScroll(String key) {
+		jumpScroll(key, 0);
 	}
 
 	// ------------------------------------------------------------------ input
 
+	private void focusField(EditBox field) {
+		setFocused(field);
+		field.setFocused(true);
+		if (field != search) search.setFocused(false);
+		if (field != styleSearch) styleSearch.setFocused(false);
+	}
+
 	@Override
 	public boolean mouseClicked(MouseButtonEvent click, boolean doubled) {
 		double x = click.x(), y = click.y();
+		if (listening != null) {
+			// a key setting is waiting: a middle or side mouse button becomes the key, any other click cancels
+			if (click.button() >= 2) bindListening(com.mojang.blaze3d.platform.InputConstants.Type.MOUSE.getOrCreate(click.button()));
+			else listening = null;
+			return true;
+		}
 		if (search.isMouseOver(x, y) || (styleSearch.visible && styleSearch.isMouseOver(x, y))
 			|| (profileName.visible && profileName.isMouseOver(x, y))) {
 			return super.mouseClicked(click, doubled);
@@ -2575,6 +3576,11 @@ public final class StudioScreen extends Screen {
 				continue;
 			}
 			if (hit.action != null) {
+				mouseDown = true;
+				pressX1 = hit.x1;
+				pressY1 = hit.y1;
+				pressX2 = hit.x2;
+				pressY2 = hit.y2;
 				hit.action.run();
 				return true;
 			}
@@ -2597,6 +3603,7 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean mouseReleased(MouseButtonEvent click) {
+		mouseDown = false;
 		if (painting) {
 			painting = false;
 			changed(true);
@@ -2628,6 +3635,12 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(KeyEvent input) {
+		if (listening != null) {
+			// the next key becomes the setting; Escape clears it
+			bindListening(input.isEscape() ? com.mojang.blaze3d.platform.InputConstants.UNKNOWN
+				: com.mojang.blaze3d.platform.InputConstants.getKey(input));
+			return true;
+		}
 		if (renamingProfile && profileName.isFocused()) {
 			if (input.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_ENTER || input.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_KP_ENTER) {
 				commitRename();
@@ -2649,10 +3662,12 @@ public final class StudioScreen extends Screen {
 			undo();
 			return true;
 		}
+		if (minecraft.hasControlDown() && input.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_S) {
+			apply();
+			return true;
+		}
 		if (minecraft.hasControlDown() && input.key() == org.lwjgl.glfw.GLFW.GLFW_KEY_F) {
-			setFocused(search);
-			search.setFocused(true);
-			styleSearch.setFocused(false);
+			focusField(search);
 			return true;
 		}
 		if (input.isEscape()) {
