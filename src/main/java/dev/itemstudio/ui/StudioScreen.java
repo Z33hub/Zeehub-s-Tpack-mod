@@ -964,8 +964,11 @@ public final class StudioScreen extends Screen {
 		return list;
 	}
 
+	/** The theme of this frame (looked up once in render). */
+	private Theme frameTheme;
+
 	private Theme theme() {
-		return Theme.byName(config.theme);
+		return frameTheme != null ? frameTheme : Theme.byName(config.theme);
 	}
 
 	// ------------------------------------------------------------------ rendering
@@ -979,7 +982,8 @@ public final class StudioScreen extends Screen {
 	private int editedSig = Integer.MIN_VALUE;
 	private int changeCount;
 	private final java.util.Set<String> editedKeys = new java.util.HashSet<>();
-	private final boolean[] categoryEdited = new boolean[Category.values().length];
+	private static final Category[] CATS = Category.values();
+	private final boolean[] categoryEdited = new boolean[CATS.length];
 
 	private void refreshEdited() {
 		int sig = System.identityHashCode(config.styles) * 31 + System.identityHashCode(config.adjust) * 17
@@ -993,7 +997,7 @@ public final class StudioScreen extends Screen {
 			if (config.hasAdjust(e.getKey())) editedKeys.add(e.getKey());
 		}
 		if (config.crosshair != null) editedKeys.add(dev.itemstudio.pack.HudElement.CROSSHAIR.key());
-		Category[] cats = Category.values();
+		Category[] cats = CATS;
 		for (int i = 0; i < cats.length; i++) {
 			Category c = cats[i];
 			boolean any = false;
@@ -1046,10 +1050,11 @@ public final class StudioScreen extends Screen {
 			searchVariant = -1;
 			packVariant = -1;
 		}
-		int key = theme().ordinal() * 1000003 + Float.floatToIntBits(config.opacity) * 31 + (accentRgb() + 7) * 17;
+		frameTheme = Theme.byName(config.theme);
+		int key = frameTheme.ordinal() * 1000003 + Float.floatToIntBits(config.opacity) * 31 + (accentRgb() + 7) * 17;
 		if (pal == null || key != palKey) {
 			palKey = key;
-			pal = theme().palette(config.opacity, accentRgb());
+			pal = frameTheme.palette(config.opacity, accentRgb());
 		}
 		layout();
 		int generation = dev.itemstudio.pack.PackIndexCache.generation();
@@ -1258,13 +1263,13 @@ public final class StudioScreen extends Screen {
 	}
 
 	private static String[] countText;
-	private final int[] railYs = new int[Category.values().length];
+	private final int[] railYs = new int[CATS.length];
 
 	private void drawRail(DrawContext ctx, int mouseX, int mouseY) {
 		int x1 = px + 1, y1 = bodyY, x2 = px + railW, y2 = footerY;
 		fill(ctx, x1, y1, x2, y2, pal.rail());
 		fill(ctx, x2, y1, x2 + 1, y2, pal.line());
-		Category[] cats = Category.values();
+		Category[] cats = CATS;
 		if (countText == null) {
 			countText = new String[cats.length];
 			for (int i = 0; i < cats.length; i++) {
@@ -1946,6 +1951,31 @@ public final class StudioScreen extends Screen {
 		scrollBar(ctx, x + w + 6, top, bottom, off, Math.max(0, content - (bottom - top)), false);
 	}
 
+	private static final String[] TWO_DECIMALS = new String[3601];
+	private static final String[] WHOLE = new String[721];
+
+	/** A slider value as text: "105%", "-3.25", "15\u00B0". Texts are remembered, so no formatting happens per frame. */
+	private static String valueText(float value, String unit, float step, float displayMul) {
+		if (displayMul != 1f) {
+			int v = Math.round(value * displayMul);
+			return v + unit;
+		}
+		if (step >= 1f) {
+			int v = Math.round(value);
+			int idx = v + 360;
+			if (idx < 0 || idx >= WHOLE.length) return v + unit;
+			String s = WHOLE[idx];
+			if (s == null) WHOLE[idx] = s = v + unit;
+			return s;
+		}
+		int v = Math.round(value * 100);
+		int idx = v + 1800;
+		if (idx < 0 || idx >= TWO_DECIMALS.length) return String.format(Locale.ROOT, "%.2f", value) + unit;
+		String s = TWO_DECIMALS[idx];
+		if (s == null) TWO_DECIMALS[idx] = s = String.format(Locale.ROOT, "%.2f", v / 100.0) + unit;
+		return s;
+	}
+
 	/** Height one slider row takes. */
 	private int sliderStep() {
 		return compact ? 22 : 25;
@@ -1961,8 +1991,7 @@ public final class StudioScreen extends Screen {
 		float value = get.get();
 		boolean changedValue = Math.abs(value - def) > 1e-4f;
 		boolean settingsSlider = label.equals("Opacity");
-		String shown = displayMul != 1f ? Math.round(value * displayMul) + unit
-			: (step >= 1f ? String.valueOf(Math.round(value)) : String.format(Locale.ROOT, "%.2f", value)) + unit;
+		String shown = valueText(value, unit, step, displayMul);
 		boolean beingDragged = dragging != null && dragging.label.equals(label);
 
 		// label and value
@@ -1979,8 +2008,7 @@ public final class StudioScreen extends Screen {
 				set.accept(def);
 				if (settingsSlider) config.save();
 				else changed(true);
-			}, null, "Put it back to " + (displayMul != 1f ? Math.round(def * displayMul) + unit
-				: (step >= 1f ? String.valueOf(Math.round(def)) : String.format(Locale.ROOT, "%.2f", def)) + unit), null));
+			}, null, "Put it back to " + valueText(def, unit, step, displayMul), null));
 		} else {
 			text(ctx, shown, barX2 - vw, y, MUTED);
 		}
@@ -2365,6 +2393,48 @@ public final class StudioScreen extends Screen {
 			+ " to see.", ix1, y, iw, MUTED);
 	}
 
+	private int lastPaintC = -1, lastPaintR = -1;
+
+	/**
+	 * Paints the crosshair square under the mouse, and the squares between it and the last one painted, so a fast
+	 * drag leaves no gaps. Returns false when the mouse isn't on the grid.
+	 */
+	private boolean paintCross(double mx, double my) {
+		if (!crossShown || my < crossTop || my >= crossBottom) {
+			lastPaintC = -1;
+			return false;
+		}
+		int c = (int) Math.floor((mx - crossX) / crossCell), r = (int) Math.floor((my - crossY) / crossCell);
+		if (c < 0 || c >= 15 || r < 0 || r >= 15) {
+			lastPaintC = -1;
+			return false;
+		}
+		char[] p = (config.crosshair != null ? config.crosshair : crosshairSeed()).toCharArray();
+		char value = paintOn ? '1' : '0';
+		int c0 = lastPaintC < 0 ? c : lastPaintC, r0 = lastPaintC < 0 ? r : lastPaintR;
+		int dc = Math.abs(c - c0), dr = Math.abs(r - r0);
+		int stepC = c0 < c ? 1 : -1, stepR = r0 < r ? 1 : -1;
+		int err = dc - dr;
+		int x = c0, y = r0;
+		while (true) {
+			p[y * 15 + x] = value;
+			if (x == c && y == r) break;
+			int e2 = 2 * err;
+			if (e2 > -dr) {
+				err -= dr;
+				x += stepC;
+			}
+			if (e2 < dc) {
+				err += dc;
+				y += stepR;
+			}
+		}
+		lastPaintC = c;
+		lastPaintR = r;
+		config.crosshair = new String(p);
+		return true;
+	}
+
 	/** The crosshair the game shows now (or the picked style's), as 225 '0'/'1' characters. */
 	private String crosshairSeed() {
 		String style = styleOf(dev.itemstudio.pack.HudElement.CROSSHAIR.key());
@@ -2432,17 +2502,6 @@ public final class StudioScreen extends Screen {
 			}
 		}
 		return new String(p);
-	}
-
-	/** Paints one crosshair square under the mouse. Returns false when the mouse isn't on the grid. */
-	private boolean paintCross(double mx, double my) {
-		if (!crossShown || my < crossTop || my >= crossBottom) return false;
-		int c = (int) Math.floor((mx - crossX) / crossCell), r = (int) Math.floor((my - crossY) / crossCell);
-		if (c < 0 || c >= 15 || r < 0 || r >= 15) return false;
-		char[] p = (config.crosshair != null ? config.crosshair : crosshairSeed()).toCharArray();
-		p[r * 15 + c] = paintOn ? '1' : '0';
-		config.crosshair = new String(p);
-		return true;
 	}
 
 	// ------------------------------------------------------------------ settings
@@ -3582,6 +3641,7 @@ public final class StudioScreen extends Screen {
 			if (c >= 0 && c < 15 && r >= 0 && r < 15 && y >= crossTop && y < crossBottom) {
 				String now = config.crosshair != null ? config.crosshair : crosshairSeed();
 				paintOn = click.button() == 0 && now.charAt(r * 15 + c) != '1';
+				lastPaintC = -1;
 				painting = paintCross(x, y);
 				return true;
 			}
@@ -3640,6 +3700,7 @@ public final class StudioScreen extends Screen {
 		mouseDown = false;
 		if (painting) {
 			painting = false;
+			lastPaintC = -1;
 			changed(true);
 			return true;
 		}
