@@ -123,6 +123,7 @@ public final class PackBuilder {
 					problems.add(source.displayName() + ": could not read " + file);
 				}
 			}
+			if (element.modelBlock() != null) copyBlockModel(element, source);
 			return;
 		}
 		for (String file : index.partAllFiles(element)) {
@@ -151,6 +152,73 @@ public final class PackBuilder {
 				problems.add(element.label() + ": could not resize " + file);
 			}
 		}
+	}
+
+	/**
+	 * Packs that outline cobwebs do it with their own block model. Bring the pack's blockstate and block model along
+	 * with the texture. The model's references to the block's own texture (block/cobweb) are left alone: they point
+	 * at the texture copied above, so the outline goes around the chosen texture. Its other textures (the outline)
+	 * are copied under new names so they can't change anything else.
+	 */
+	private void copyBlockModel(TexturePart element, PackSource source) {
+		if (index.partModelFiles(source, element).isEmpty()) return;
+		String stateFile = PackIndex.blockModelFiles(element.modelBlock()).get(0);
+		Set<String> own = new java.util.HashSet<>();
+		for (String file : index.partFiles(source, element)) {
+			String ref = textureRefOf(file);
+			if (ref != null) own.add(ref);
+		}
+		Copier copier = new Copier(source, own);
+		JsonElement state;
+		try {
+			state = Resources.parse(source.has(stateFile) ? source.read(stateFile) : Resources.readBelow(stateFile));
+		} catch (Exception e) {
+			state = null;
+		}
+		if (state == null || !state.isJsonObject()) {
+			problems.add(element.label() + ": no blockstate found");
+			return;
+		}
+		boolean changed = source.has(stateFile);
+		changed |= rewriteStateModels(state.getAsJsonObject(), copier::model);
+		if (changed) put(stateFile, state);
+	}
+
+	/** "assets/minecraft/textures/block/cobweb.png" -> "minecraft:block/cobweb". */
+	private static String textureRefOf(String file) {
+		String f = file.toLowerCase(java.util.Locale.ROOT);
+		if (!f.startsWith("assets/") || !f.endsWith(".png")) return null;
+		int ns = f.indexOf('/', 7);
+		if (ns < 0 || !f.startsWith("/textures/", ns)) return null;
+		return f.substring(7, ns) + ":" + f.substring(ns + "/textures/".length(), f.length() - 4);
+	}
+
+	/** Points every model in a blockstate (variants and multipart) at fn(model) when that isn't null. */
+	private static boolean rewriteStateModels(JsonObject state, java.util.function.Function<String, String> fn) {
+		boolean changed = false;
+		List<JsonElement> entries = new ArrayList<>();
+		if (state.has("variants") && state.get("variants").isJsonObject()) {
+			for (Map.Entry<String, JsonElement> e : state.getAsJsonObject("variants").entrySet()) entries.add(e.getValue());
+		}
+		if (state.has("multipart") && state.get("multipart").isJsonArray()) {
+			for (JsonElement part : state.getAsJsonArray("multipart")) {
+				if (part.isJsonObject() && part.getAsJsonObject().has("apply")) entries.add(part.getAsJsonObject().get("apply"));
+			}
+		}
+		for (JsonElement entry : entries) {
+			List<JsonElement> models = new ArrayList<>();
+			if (entry.isJsonArray()) entry.getAsJsonArray().forEach(models::add);
+			else models.add(entry);
+			for (JsonElement m : models) {
+				if (!m.isJsonObject() || !m.getAsJsonObject().has("model")) continue;
+				String copied = fn.apply(Refs.full(m.getAsJsonObject().get("model").getAsString()));
+				if (copied != null) {
+					m.getAsJsonObject().addProperty("model", copied);
+					changed = true;
+				}
+			}
+		}
+		return changed;
 	}
 
 	private void buildItem(ItemInfo info) throws Exception {
@@ -313,9 +381,16 @@ public final class PackBuilder {
 		private final PackSource source;
 		private final Map<String, String> copiedModels = new HashMap<>();
 		private final Map<String, String> copiedTextures = new HashMap<>();
+		/** Texture refs left as they are (a block's own textures, copied in place). */
+		private final Set<String> keep;
 
 		Copier(PackSource source) {
+			this(source, Set.of());
+		}
+
+		Copier(PackSource source, Set<String> keep) {
 			this.source = source;
+			this.keep = keep;
 		}
 
 		/** Copies a model (and its parents and textures) if this pack has it. Returns the new id, or null. */
@@ -393,6 +468,7 @@ public final class PackBuilder {
 		 * texture still lands in the same texture atlas as before.
 		 */
 		private String texture(String ref) {
+			if (keep.contains(ref)) return null;
 			String file = Refs.textureFile(ref);
 			if (!source.has(file)) return null;
 			String done = copiedTextures.get(ref);

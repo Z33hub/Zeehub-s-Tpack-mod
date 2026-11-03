@@ -82,6 +82,12 @@ public enum BlockElement implements TexturePart {
 		return itemId;
 	}
 
+	/** Cobweb outline packs draw the outline with their own block model, so that comes along with the texture. */
+	@Override
+	public String modelBlock() {
+		return this == COBWEB ? "cobweb" : null;
+	}
+
 	String[] patterns() {
 		return patterns;
 	}

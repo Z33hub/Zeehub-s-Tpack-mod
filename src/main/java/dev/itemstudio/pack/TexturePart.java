@@ -24,6 +24,14 @@ public interface TexturePart {
 		return null;
 	}
 
+	/**
+	 * A block whose model a pack may change along with the texture (cobweb outlines), or null. When the chosen pack
+	 * has its own blockstate or block model for it, they are copied too.
+	 */
+	default String modelBlock() {
+		return null;
+	}
+
 	/** True for particles, which can be made bigger or smaller. */
 	default boolean resizable() {
 		return this instanceof ParticleElement;
