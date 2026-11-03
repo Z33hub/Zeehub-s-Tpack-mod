@@ -52,7 +52,7 @@ public final class ProfileSwitcher {
 			} finally {
 				index.close();
 			}
-		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((result, error) -> {
+		}, dev.itemstudio.Workers.BUILD).whenCompleteAsync((result, error) -> {
 			busy = false;
 			if (error != null || result == null || result[0] == PackWriter.Result.FAILED.ordinal()) {
 				ItemStudioClient.LOG.warn("Could not switch profile", error);

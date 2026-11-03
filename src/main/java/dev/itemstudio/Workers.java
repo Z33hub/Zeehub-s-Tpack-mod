@@ -7,17 +7,19 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Background threads for Item Studio, kept at low priority so they never take time from the game's own frames.
- * BACKGROUND does one job at a time (pack scans, comparing packs, building the pack); PREVIEWS draws card pictures,
- * newest request first, so what you are looking at now is ready before cards you scrolled past.
+ * BACKGROUND does one job at a time (pack scans, comparing packs); BUILD builds the pack (Apply, profile switch,
+ * export) on its own thread so it never waits behind comparing; PREVIEWS draws card pictures, newest request first,
+ * so what you are looking at now is ready before cards you scrolled past.
  */
 public final class Workers {
-	public static final ExecutorService BACKGROUND = pool("Item Studio worker", 1, false);
-	public static final ExecutorService PREVIEWS = pool("Item Studio previews", 2, true);
+	public static final ExecutorService BACKGROUND = pool("Item Studio worker", 1, false, Thread.MIN_PRIORITY);
+	public static final ExecutorService BUILD = pool("Item Studio build", 1, false, Thread.NORM_PRIORITY - 1);
+	public static final ExecutorService PREVIEWS = pool("Item Studio previews", 2, true, Thread.MIN_PRIORITY);
 
 	private Workers() {
 	}
 
-	private static ExecutorService pool(String name, int threads, boolean newestFirst) {
+	private static ExecutorService pool(String name, int threads, boolean newestFirst, int priority) {
 		LinkedBlockingDeque<Runnable> queue = newestFirst ? new LinkedBlockingDeque<>() {
 			@Override
 			public boolean offer(Runnable r) {
@@ -27,7 +29,7 @@ public final class Workers {
 		ThreadPoolExecutor executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS, queue, r -> {
 			Thread t = new Thread(r, name);
 			t.setDaemon(true);
-			t.setPriority(Thread.MIN_PRIORITY);
+			t.setPriority(priority);
 			return t;
 		});
 		executor.allowCoreThreadTimeOut(true);
