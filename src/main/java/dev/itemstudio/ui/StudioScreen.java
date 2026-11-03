@@ -3532,8 +3532,8 @@ public final class StudioScreen extends Screen {
 
 	/** A thin scroll bar along the right edge of a scrolling area, only when there is more to see. */
 	private void scrollBar(DrawContext ctx, int x2, int y1, int y2, int offset, int max, boolean active) {
-		if (max <= 0) return;
 		int view = y2 - y1;
+		if (max <= 0 || view <= 0) return;
 		int thumb = Math.max(10, view * view / (view + max));
 		int ty = y1 + (view - thumb) * offset / max;
 		round(ctx, x2 - 3, ty, x2 - 1, ty + thumb, active ? Theme.argb(pal.accentText() & 0xFFFFFF, 0.6f) : 0x40FFFFFF, CORNERS_1);
