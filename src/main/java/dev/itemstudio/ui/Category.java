@@ -25,7 +25,7 @@ public enum Category {
 	THROWABLES("Pots & Pearls", Items.ENDER_PEARL, p -> p.endsWith("potion") || Set.of("ender_pearl",
 		"wind_charge", "snowball", "egg", "experience_bottle", "fire_charge", "firework_rocket").contains(p)),
 	CRYSTAL("Crystal PvP", Items.END_CRYSTAL, p -> Set.of("end_crystal", "respawn_anchor", "glowstone",
-		"obsidian", "crying_obsidian", "cobweb", "tnt", "tnt_minecart", "flint_and_steel", "lava_bucket",
+		"obsidian", "crying_obsidian", "tnt", "tnt_minecart", "flint_and_steel", "lava_bucket",
 		"water_bucket", "fishing_rod", "rail", "detector_rail", "activator_rail", "powered_rail").contains(p)),
 	TOOLS("Other tools", Items.DIAMOND_SHOVEL, p -> p.endsWith("_shovel") || p.endsWith("_hoe")
 		|| Set.of("shears", "brush", "spyglass", "clock", "compass", "recovery_compass").contains(p)),
