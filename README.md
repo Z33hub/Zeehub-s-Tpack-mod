@@ -14,6 +14,16 @@ resource packs you already have, and change each item's size, position and rotat
      Right-click a slider to reset it.
 4. Press **Apply**. Changes are also applied when you close the menu.
 
+## Menu settings
+
+Click the gear in the top right corner of the menu (or the settings button in Mod Menu):
+
+- **Look**: theme, accent colour, window opacity, corner style (sharp, soft or round) and menu font.
+- **Layout**: spacing (auto, compact or roomy), style card size, category list (names or icons), side panel
+  width and animations.
+- **General**: turn the mod on or off, check for updates, tooltips, the three keys (open menu, turn on/off, next
+  profile) and a list of shortcuts. **Reset look** puts the look back to how it came.
+
 Item Studio writes a pack called `ItemStudio-Generated` into your resourcepacks folder and keeps it at the top.
 Your choices are saved in `config/itemstudio.json`.
 

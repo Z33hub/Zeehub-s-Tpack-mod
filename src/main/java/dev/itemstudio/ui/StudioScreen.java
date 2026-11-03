@@ -83,10 +83,12 @@ public final class StudioScreen extends Screen {
 			set.accept(clampStep(Math.round(raw / step) * step));
 		}
 
-		/** One step up or down (the little arrows next to a slider). */
+		/** One step up or down (the little arrows next to a slider). Off the step grid, it first moves onto it. */
 		void nudge(int steps) {
-			float now = get.get();
-			set.accept(clampStep(Math.round((now + steps * step) / step) * step));
+			float q = get.get() / step;
+			boolean onGrid = Math.abs(q - Math.round(q)) < 1e-3f;
+			float target = onGrid ? Math.round(q) + steps : steps > 0 ? (float) Math.ceil(q) : (float) Math.floor(q);
+			set.accept(clampStep(target * step));
 		}
 
 		private float clampStep(float v) {
@@ -240,13 +242,15 @@ public final class StudioScreen extends Screen {
 		previews.newSession();
 		if (selected == null && !category.items().isEmpty()) selected = category.items().get(0);
 		layout();
+		// the placeholder texts are chosen to fit by drawHeader / drawCenter, once per size
+		searchVariant = -1;
+		packVariant = -1;
 
 		// The text boxes are moved to their place every frame (see placeFields), so these sizes are only a start.
 		search = new TextFieldWidget(textRenderer, px + pw - 150, py + 8, 100, 10, Text.literal("Search all items"));
 		search.setDrawsBackground(false);
 		search.setMaxLength(50);
 		search.setText(query);
-		search.setPlaceholder(styledIn("Search all items", menuFont(), false).withColor(MUTED));
 		search.setChangedListener(text -> {
 			query = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("items", 0);
@@ -258,7 +262,6 @@ public final class StudioScreen extends Screen {
 		styleSearch.setDrawsBackground(false);
 		styleSearch.setMaxLength(50);
 		styleSearch.setText(styleQuery);
-		styleSearch.setPlaceholder(styledIn("Search packs", menuFont(), false).withColor(MUTED));
 		styleSearch.setChangedListener(text -> {
 			styleQuery = text.trim().toLowerCase(Locale.ROOT);
 			scroll.put("cards", 0);
@@ -1228,6 +1231,7 @@ public final class StudioScreen extends Screen {
 		boolean sh = hot(mouseX, mouseY, sx1, cy, sx2, cy + ctl);
 		inputFrame(ctx, sx1, cy, sx2, cy + ctl, focused, sh, 0x7010);
 		icon(ctx, Icons.SEARCH, sx1 + 6, cy + (ctl - 8) / 2, focused ? pal.accentText() : MUTED);
+		hits.add(new Hit(sx1, cy, sx2, cy + ctl, () -> focusField(search), null, null, null));
 		int clearW = query.isEmpty() ? 0 : 14;
 		int variant = placeholderFor(sw - 19 - 6 - clearW);
 		if (variant != searchVariant) {
@@ -1237,7 +1241,7 @@ public final class StudioScreen extends Screen {
 		search.setX(sx1 + 19);
 		search.setY(cy + (ctl - 8) / 2);
 		search.setWidth(sw - 19 - 6 - clearW);
-		if (query.isEmpty() && !focused && sw >= 120) {
+		if (query.isEmpty() && !focused && sx1 + 19 + textW(ALL_PLACEHOLDERS[variant]) + 10 < sx2 - 6 - smallW("Ctrl F")) {
 			small(ctx, "Ctrl F", sx2 - smallW("Ctrl F") - 6, cy + (ctl - smallH()) / 2 + (pixelFont() ? 0 : 1), 0x55FFFFFF);
 		}
 		if (!query.isEmpty()) {
@@ -1316,6 +1320,7 @@ public final class StudioScreen extends Screen {
 			int iconX = railFull ? bx1 + 5 : x1 + (railW - 1 - 16) / 2;
 			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), iconX, y + (railRow - 16) / 2, 16);
 			boolean edited = categoryEdited[i] && cat != Category.ALL;
+			boolean cut = false;
 			if (railFull) {
 				String count = countText[i];
 				int countW = smallW(count);
@@ -1325,7 +1330,9 @@ public final class StudioScreen extends Screen {
 				}
 				int labelX = iconX + 16 + 5;
 				int labelMax = bx2 - 5 - countW - (edited ? 12 : 4) - labelX;
-				text(ctx, trim(cat.label, labelMax), labelX, y + (railRow - 8) / 2, active ? WHITE : Anim.mix(TEXT2, WHITE, t));
+				String shownLabel = trim(cat.label, labelMax);
+				cut = !shownLabel.equals(cat.label);
+				text(ctx, shownLabel, labelX, y + (railRow - 8) / 2, active ? WHITE : Anim.mix(TEXT2, WHITE, t));
 				if (countW > 0) small(ctx, count, right - countW, y + (railRow - smallH()) / 2 + (pixelFont() ? 0 : 1), active ? pal.accentText() : MUTED);
 			} else if (edited) {
 				icon(ctx, Icons.DOT, bx2 - 4, y + 2, pal.accent());
@@ -1339,11 +1346,17 @@ public final class StudioScreen extends Screen {
 				resetScroll("items");
 				resetScroll("cards");
 				if (!target.items().isEmpty()) selected = target.items().get(0);
-			}, railFull ? null : cat.label);
+			}, !railFull || cut ? cat.label : null);
 		}
 		ctx.disableScissor();
 		scrollBar(ctx, x2, top, y2, off, Math.max(0, content - view), false);
 	}
+
+	/** How far one wheel notch moves the item strip: exactly one row. */
+	private int itemsStep = 28;
+	private static final String[] FILTER_NAMES = {"All", "Favorites", "Recent"};
+	private static final Icons[] FILTER_ICONS = {null, Icons.STAR, Icons.CLOCK};
+	private static final String[] FILTER_TIPS = {"Every pack", "Only the packs you starred (right-click a card to star it)", "The packs you used last"};
 
 	private void drawCenter(DrawContext ctx, int mouseX, int mouseY) {
 		List<Target> items = tiles();
@@ -1401,6 +1414,7 @@ public final class StudioScreen extends Screen {
 			}
 			revealTile = false;
 		}
+		itemsStep = tile + tgap;
 		int off = scrollOf("items", content, areaH);
 		scrollAreas.add(new ScrollArea("items", x, y, x + w, y + areaH, Math.max(0, content - areaH)));
 		if (items.isEmpty()) {
@@ -1442,8 +1456,8 @@ public final class StudioScreen extends Screen {
 
 		// toolbar: pack search, filter, sort
 		int h = ctl;
-		String[] filterNames = {"All", "Favorites", "Recent"};
-		Icons[] filterIcons = {null, Icons.STAR, Icons.CLOCK};
+		String[] filterNames = FILTER_NAMES;
+		Icons[] filterIcons = FILTER_ICONS;
 		boolean zToA = config.sortZtoA;
 		String sortFull = zToA ? "Name Z-A" : "Name A-Z";
 		String sortShort = zToA ? "Z-A" : "A-Z";
@@ -1473,6 +1487,7 @@ public final class StudioScreen extends Screen {
 		boolean sfocus = styleSearch.isFocused();
 		inputFrame(ctx, sx1, y, sx2, y + h, sfocus, hot(mouseX, mouseY, sx1, y, sx2, y + h), 0x7020);
 		icon(ctx, Icons.SEARCH, sx1 + 6, y + (h - 8) / 2, sfocus ? pal.accentText() : MUTED);
+		hits.add(new Hit(sx1, y, sx2, y + h, () -> focusField(styleSearch), null, null, null));
 		int clearW = styleQuery.isEmpty() ? 0 : 14;
 		int fieldW = searchW - 19 - 6 - clearW;
 		int variant = placeholderFor(fieldW);
@@ -1499,7 +1514,7 @@ public final class StudioScreen extends Screen {
 			labels[i] = tight && i > 0 ? null : filterNames[i];
 			icons[i] = filterIcons[i];
 		}
-		String[] tips = {"Every pack", "Only the packs you starred (right-click a card to star it)", "The packs you used last"};
+		String[] tips = FILTER_TIPS;
 		segmented(ctx, 0x7030, fx, y, segW, h, labels, icons, widths, filter.ordinal(), mouseX, mouseY, i -> {
 			filter = Filter.values()[i];
 			resetScroll("cards");
@@ -1657,7 +1672,7 @@ public final class StudioScreen extends Screen {
 			}
 		}
 
-		int[] lg = shapeLg();
+		int[] lg = shapeSm(); // cards use the small corner shape: cheaper to draw, and they are many
 		int[] sm = shapeSm();
 		ctx.enableScissor(x - 2, top, x + w + 2, bottom);
 		for (int i = 0; i < cards.size(); i++) {
@@ -1709,7 +1724,7 @@ public final class StudioScreen extends Screen {
 			if (card.sourceId != null && !VanillaSource.ID.equals(card.sourceId) && (fav || hover)) {
 				int sx = cx + cp + 3, sy = y0 + cp + 3;
 				boolean starHover = inside(mouseX, mouseY, sx - 2, sy - 2, sx + 11, sy + 11);
-				icon(ctx, fav ? Icons.STAR : Icons.STAR_OUTLINE, sx, sy, fav ? GOLD : starHover ? WHITE : 0xB0FFFFFF);
+				icon(ctx, Icons.STAR, sx, sy, fav ? GOLD : starHover ? WHITE : 0xB0FFFFFF);
 				addHit(sx - 2, sy - 2, sx + 11, sy + 11, top, bottom, favToggle, favToggle,
 					fav ? "Remove from favorites" : "Add to favorites");
 			}
@@ -1852,12 +1867,12 @@ public final class StudioScreen extends Screen {
 		String reset = "Reset all " + category.label.toLowerCase(Locale.ROOT) + " to Default";
 		int bh = ctl - 2;
 		if (anyStyled) {
-			int rw = buttonW(reset, Icons.RESET);
+			int rw = buttonW(reset, Icons.UNDO);
 			if (y + bh > top && y < bottom) {
-				button(ctx, x + w - rw, y, rw, bh, reset, Icons.RESET, BTN_NORMAL, mouseX, mouseY, () -> useForCategory(null), null);
+				button(ctx, x + w - rw, y, rw, bh, reset, Icons.UNDO, BTN_NORMAL, mouseX, mouseY, () -> useForCategory(null), null);
 			}
 		}
-		small(ctx, smallTrim("Faded tiles = that pack doesn't change this item.", w - (anyStyled ? buttonW(reset, Icons.RESET) + 8 : 0)),
+		small(ctx, smallTrim("Faded tiles = that pack doesn't change this item.", w - (anyStyled ? buttonW(reset, Icons.UNDO) + 8 : 0)),
 			x, y + (bh - smallH()) / 2 + (pixelFont() ? 0 : 1), MUTED);
 		y += headH;
 
@@ -1954,11 +1969,11 @@ public final class StudioScreen extends Screen {
 		text(ctx, trim(label, barX2 - barX1 - textW(shown) - 14), barX1, y, changedValue ? TEXT : TEXT2);
 		int vw = textW(shown);
 		if (changedValue) {
-			int rx1 = barX2 - vw - Icons.RESET.w - 8, rx2 = barX2 + 2;
+			int rx1 = barX2 - vw - Icons.UNDO.w - 8, rx2 = barX2 + 2;
 			boolean rh = hot(mouseX, mouseY, rx1, y - 2, rx2, y + 10);
 			float rt = anim.fade(fadeKey(label, barX1) + 3, rh, 16f);
 			round(ctx, rx1, y - 2, rx2, y + 10, Anim.mix(0, pal.soft(), rt), shapeSm());
-			icon(ctx, Icons.RESET, rx1 + 3, y + 0, Anim.mix(pal.accentText(), WHITE, rt));
+			icon(ctx, Icons.UNDO, rx1 + 3, y + 0, Anim.mix(pal.accentText(), WHITE, rt));
 			text(ctx, shown, barX2 - vw, y, Anim.mix(pal.accentText(), WHITE, rt));
 			hits.add(new Hit(rx1, y - 2, rx2, y + 10, () -> {
 				set.accept(def);
@@ -2021,19 +2036,19 @@ public final class StudioScreen extends Screen {
 		small(ctx, caps, x1, y, MUTED);
 		int tx = x1 + smallW(caps) + 5;
 		// when the title and the link don't both fit, the link is just its icon
-		boolean iconOnly = smallW(caps) + 8 + smallW(action) + Icons.RESET.w + 4 > x2 - x1;
-		int aw = iconOnly ? Icons.RESET.w : smallW(action) + (enabled ? Icons.RESET.w + 4 : 0);
+		boolean iconOnly = smallW(caps) + 8 + smallW(action) + Icons.UNDO.w + 4 > x2 - x1;
+		int aw = iconOnly ? Icons.UNDO.w : smallW(action) + (enabled ? Icons.UNDO.w + 4 : 0);
 		int ax = x2 - aw;
 		if (ax - 5 > tx) fill(ctx, tx, y + smallH() / 2 - 1, ax - 5, y + smallH() / 2, pal.line());
 		if (enabled) {
 			boolean h = hot(mouseX, mouseY, ax - 3, y - 3, x2 + 2, y + smallH() + 3);
 			float t = anim.fade(fadeKey(action, x1) + 1, h, 16f);
 			int c = Anim.mix(pal.accentText(), WHITE, t);
-			icon(ctx, Icons.RESET, ax, y + (smallH() - Icons.RESET.h) / 2 + (pixelFont() ? 0 : 1), c);
-			if (!iconOnly) small(ctx, action, ax + Icons.RESET.w + 4, y, c);
+			icon(ctx, Icons.UNDO, ax, y + (smallH() - Icons.UNDO.h) / 2 + (pixelFont() ? 0 : 1), c);
+			if (!iconOnly) small(ctx, action, ax + Icons.UNDO.w + 4, y, c);
 			hits.add(new Hit(ax - 3, y - 3, x2 + 2, y + smallH() + 3, run, null, tooltip, null));
 		} else if (iconOnly) {
-			icon(ctx, Icons.RESET, ax, y + (smallH() - Icons.RESET.h) / 2 + (pixelFont() ? 0 : 1), 0x44FFFFFF);
+			icon(ctx, Icons.UNDO, ax, y + (smallH() - Icons.UNDO.h) / 2 + (pixelFont() ? 0 : 1), 0x44FFFFFF);
 		} else {
 			small(ctx, action, ax, y, 0x55FFFFFF);
 		}
@@ -2041,7 +2056,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	/** The picture box at the top of the side panel. Returns the y below it. */
-	private int drawStage(DrawContext ctx, int ix1, int ix2, int y, Target t, boolean edited, boolean pictureDrawn) {
+	private int drawStage(DrawContext ctx, int ix1, int ix2, int y, boolean edited) {
 		int[] lg = shapeLg();
 		box(ctx, ix1, y, ix2, y + stageH, pal.well(), pal.line(), lg);
 		// a faint floor line gives the item something to stand on
@@ -2083,7 +2098,7 @@ public final class StudioScreen extends Screen {
 		// preview stage: the chosen style's texture, big
 		String style = ready() ? styleOf(selected) : null;
 		int stageY = y;
-		y = drawStage(ctx, ix1, ix2, y, selectedTarget, isEdited(selectedTarget), false);
+		y = drawStage(ctx, ix1, ix2, y, isEdited(selectedTarget));
 		int picture = Math.min(stageH - 14, 56);
 		int picX = ix1 + (iw - picture) / 2, picY = stageY + (stageH - 12 - picture) / 2;
 		boolean drawn = false;
@@ -2177,7 +2192,7 @@ public final class StudioScreen extends Screen {
 		y += 2;
 		boolean anyEdited = config.hasAdjust(itemId);
 		int rh = ctl - 2;
-		button(ctx, ix1, y, iw, rh, "Reset all views", anyEdited ? Icons.RESET : null, anyEdited ? BTN_NORMAL : BTN_FLAT, mouseX, mouseY, () -> {
+		button(ctx, ix1, y, iw, rh, "Reset all views", anyEdited ? Icons.UNDO : null, anyEdited ? BTN_NORMAL : BTN_FLAT, mouseX, mouseY, () -> {
 			if (config.hasAdjust(itemId)) {
 				config.adjust.remove(itemId);
 				changed(true);
@@ -2208,7 +2223,7 @@ public final class StudioScreen extends Screen {
 		boolean resizable = t.part.resizable();
 		float size = resizable ? config.partSizeOf(key) : 1f;
 		int stageY = y;
-		y = drawStage(ctx, ix1, ix2, y, t, isEdited(t), false);
+		y = drawStage(ctx, ix1, ix2, y, isEdited(t));
 		String style = ready() ? styleOf(key) : null;
 		PackSource src = style == null || index == null ? null : index.get(style);
 		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
@@ -2503,14 +2518,14 @@ public final class StudioScreen extends Screen {
 		fill(ctx, x1, contentBottom, x2, contentBottom + 1, pal.line());
 		int by = contentBottom + (barH - ctl) / 2;
 		int half = (iw - 4) / 2;
-		String resetLabel = buttonW("Reset look", Icons.RESET) <= half ? "Reset look" : "Reset";
-		button(ctx, ix1, by, half, ctl, resetLabel, Icons.RESET, BTN_NORMAL, mouseX, mouseY, () -> {
+		String resetLabel = buttonW("Reset look", Icons.UNDO) <= half ? "Reset look" : "Reset";
+		button(ctx, ix1, by, half, ctl, resetLabel, Icons.UNDO, BTN_NORMAL, mouseX, mouseY, () -> {
 			config.resetLook();
 			config.save();
 			setStatus("Menu look put back to how it came", MUTED);
 		}, "Theme, accent, opacity, font, spacing, corners and motion back to the defaults");
 		button(ctx, ix1 + half + 4, by, iw - half - 4, ctl, "Done", Icons.CHECK, BTN_PRIMARY, mouseX, mouseY,
-			() -> settingsOpen = false, null);
+			() -> settingsOpen = false, "Close the settings (Esc)");
 	}
 
 	private int settingsContent = 400;
@@ -2776,6 +2791,8 @@ public final class StudioScreen extends Screen {
 	private void drawProfiles(DrawContext ctx, int mouseX, int mouseY) {
 		// a click anywhere outside the list closes it
 		hits.add(new Hit(0, 0, width, height, this::closeProfiles, this::closeProfiles, null, null));
+		// the rest of the menu steps back a little
+		fill(ctx, px + 1, bodyY, px + pw - 1, py + ph - 1, 0x38000000);
 		List<String> names = new ArrayList<>(config.profiles.keySet());
 		int w = compact ? 196 : 212, rowH = compact ? 16 : 18;
 		int x = Math.min(profileChipX, px + pw - w - 4), y = bodyY + 3;
@@ -2999,6 +3016,9 @@ public final class StudioScreen extends Screen {
 		switchProfile(name);
 	}
 
+	private int pendingTextFor = -1;
+	private String pendingText;
+
 	private void drawFooter(DrawContext ctx, int mouseX, int mouseY) {
 		bandBottom(ctx, px, footerY, px + pw, py + ph, pal.header(), shapeLg());
 		fill(ctx, px + 1, footerY, px + pw - 1, footerY + 1, pal.line());
@@ -3008,7 +3028,10 @@ public final class StudioScreen extends Screen {
 
 		// Apply: the main action. A pulse around it while changes are waiting.
 		String applyLabel = "Apply changes";
-		String pendingText = pending > 0 ? String.valueOf(pending) : null;
+		if (pending != pendingTextFor) {
+			pendingTextFor = pending;
+			pendingText = pending > 0 ? String.valueOf(pending) : null;
+		}
 		int pillW = pendingText != null ? textW(pendingText) + 9 : 0;
 		int aw = boldW(applyLabel) + 18 + (pending > 0 ? pillW + 6 : 0);
 		right -= aw;
@@ -3292,7 +3315,7 @@ public final class StudioScreen extends Screen {
 	                    int mouseX, int mouseY, Runnable action, String tooltip) {
 		boolean hover = hot(mouseX, mouseY, x, y, x + w, y + h);
 		boolean down = pressed(x, y, x + w, y + h);
-		float t = anim.fade(fadeKey(label == null ? "icon" + ic : label, x), hover, 16f);
+		float t = anim.fade(Anim.key(label != null ? label.hashCode() : 0x5000 + (ic == null ? 0 : ic.ordinal()), x), hover, 16f);
 		int bg, border, fg;
 		switch (style) {
 			case BTN_PRIMARY -> {
@@ -3384,25 +3407,36 @@ public final class StudioScreen extends Screen {
 	 * A row of choices where one is selected; the highlight slides to the new choice. Returns nothing: it draws
 	 * into the box x, y, w, h. labels[i] may be null for an icon-only choice (icons[i] then shows).
 	 */
+	private final int[] segmentXs = new int[16];
+	private final int[] segmentWs = new int[16];
+
 	private void segmented(DrawContext ctx, int key, int x, int y, int w, int h, String[] labels, Icons[] icons, int[] widths,
 	                       int selected, int mouseX, int mouseY, java.util.function.IntConsumer onSelect, String[] tooltips) {
 		int n = labels.length;
 		box(ctx, x, y, x + w, y + h, pal.surface(), pal.surfaceBorder(), shapeSm());
 		int inner = w - 4;
-		int[] xs = new int[n + 1];
-		int total = 0;
-		if (widths == null) {
-			for (int i = 0; i < n; i++) xs[i] = x + 2 + inner * i / n;
-			xs[n] = x + 2 + inner;
-		} else {
-			for (int i = 0; i < n; i++) total += widths[i];
-			int acc = 0;
-			for (int i = 0; i < n; i++) {
-				xs[i] = x + 2 + inner * acc / Math.max(1, total);
-				acc += widths[i];
+		int[] xs = segmentXs;
+		int[] ws = segmentWs;
+		// every choice gets the same share, unless a name is wider than that: then shares follow the names
+		boolean equal = widths == null;
+		if (equal) {
+			for (int i = 0; i < n && equal; i++) {
+				int natural = (labels[i] == null ? 0 : textW(labels[i])) + (icons == null || icons[i] == null ? 0 : icons[i].w + 3) + 8;
+				if (natural > inner / n) equal = false;
 			}
-			xs[n] = x + 2 + inner;
 		}
+		int total = 0;
+		for (int i = 0; i < n; i++) {
+			ws[i] = equal ? 1 : widths != null ? widths[i]
+				: (labels[i] == null ? 0 : textW(labels[i])) + (icons == null || icons[i] == null ? 0 : icons[i].w + 3) + 8;
+			total += ws[i];
+		}
+		int acc = 0;
+		for (int i = 0; i < n; i++) {
+			xs[i] = x + 2 + inner * acc / Math.max(1, total);
+			acc += ws[i];
+		}
+		xs[n] = x + 2 + inner;
 		float ax1 = anim.to(Anim.key(key, 1000), xs[selected], 16f);
 		float ax2 = anim.to(Anim.key(key, 1001), xs[selected + 1], 16f);
 		round(ctx, Math.round(ax1), y + 2, Math.round(ax2), y + h - 2, pal.soft(), shapeSm());
@@ -3413,10 +3447,10 @@ public final class StudioScreen extends Screen {
 			float t = anim.fade(Anim.key(key, i + 2), hover && !on, 16f);
 			int color = on ? WHITE : Anim.mix(MUTED, TEXT, t);
 			if (!on && t > 0.01f) round(ctx, sx1, y + 2, sx2, y + h - 2, Anim.mix(0, pal.surface(), t), shapeSm());
-			String label = labels[i];
 			Icons ic = icons == null ? null : icons[i];
+			int iw = ic == null ? 0 : ic.w + (labels[i] == null ? 0 : 3);
+			String label = labels[i] == null ? null : trim(labels[i], Math.max(8, sx2 - sx1 - 4 - iw));
 			int lw = label == null ? 0 : textW(label);
-			int iw = ic == null ? 0 : ic.w + (label == null ? 0 : 3);
 			int cx = sx1 + (sx2 - sx1 - lw - iw) / 2;
 			if (ic != null) {
 				icon(ctx, ic, cx, y + (h - ic.h) / 2, on ? pal.accentText() : color);
@@ -3624,7 +3658,8 @@ public final class StudioScreen extends Screen {
 			ScrollArea area = scrollAreas.get(i);
 			if (profilesOpen && !area.key.equals("profiles")) continue;
 			if (inside(mouseX, mouseY, area.x1, area.y1, area.x2, area.y2)) {
-				int value = scroll.getOrDefault(area.key, 0) - (int) Math.round(verticalAmount * 24);
+				int step = area.key.equals("items") ? itemsStep : 24;
+				int value = scroll.getOrDefault(area.key, 0) - (int) Math.round(verticalAmount * step);
 				scroll.put(area.key, Math.max(0, Math.min(area.max, value)));
 				return true;
 			}
