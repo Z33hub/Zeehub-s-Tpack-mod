@@ -5,13 +5,16 @@ import com.terraformersmc.modmenu.api.ModMenuApi;
 import com.terraformersmc.modmenu.api.UpdateChannel;
 import com.terraformersmc.modmenu.api.UpdateChecker;
 import com.terraformersmc.modmenu.api.UpdateInfo;
-import dev.itemstudio.ui.StudioConfigScreen;
+import dev.itemstudio.ui.StudioScreen;
 
-/** Adds a settings button and an update badge to Item Studio in Mod Menu. Only loaded when Mod Menu is installed. */
+/**
+ * Adds a settings button and an update badge to Item Studio in Mod Menu. The settings button opens the Item Studio
+ * menu with its settings panel showing. Only loaded when Mod Menu is installed.
+ */
 public final class ModMenuIntegration implements ModMenuApi {
 	@Override
 	public ConfigScreenFactory<?> getModConfigScreenFactory() {
-		return StudioConfigScreen::new;
+		return StudioScreen::withSettings;
 	}
 
 	@Override
