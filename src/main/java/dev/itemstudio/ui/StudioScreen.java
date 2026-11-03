@@ -168,18 +168,8 @@ public final class StudioScreen extends Screen {
 	/** Opens on the category, item and parts the menu was left on last time (this session). */
 	private void restoreView() {
 		if (lastCategory != null) category = lastCategory;
-		if (lastItem != null) {
-			if (!category.items().contains(lastItem)) {
-				// picked from a search: open the category it belongs to
-				for (Category c : Category.values()) {
-					if (c != Category.ALL && c.items().contains(lastItem)) {
-						category = c;
-						break;
-					}
-				}
-			}
-			if (category.items().contains(lastItem)) selected = lastItem;
-		}
+		// part categories (Blocks, HUD...) have no items: the item picked in another category stays unselected
+		if (lastItem != null && category.items().contains(lastItem)) selected = lastItem;
 		selectedPart.putAll(lastParts);
 		revealRail = true;
 		revealTile = true;
@@ -187,7 +177,17 @@ public final class StudioScreen extends Screen {
 
 	/** Keeps the category, item and parts the menu is on, for the next time it opens. */
 	private void rememberView() {
-		lastCategory = category;
+		Category open = category;
+		if (!query.isEmpty() && selected != null && !open.items().contains(selected)) {
+			// closed while showing search results: next time, open on the picked item's own category
+			for (Category c : Category.values()) {
+				if (c != Category.ALL && c.items().contains(selected)) {
+					open = c;
+					break;
+				}
+			}
+		}
+		lastCategory = open;
 		lastItem = selected;
 		lastParts.clear();
 		lastParts.putAll(selectedPart);
