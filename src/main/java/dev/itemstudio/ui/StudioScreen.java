@@ -319,7 +319,7 @@ public final class StudioScreen extends Screen {
 		gap = compact ? 6 : 8;
 		tile = compact ? 22 : 24;
 		railRow = compact ? 19 : 22;
-		stageH = compact ? 52 : 68;
+		stageH = compact ? 52 : 76;
 		bodyY = py + headerH;
 		footerY = py + ph - footerH;
 		railFull = config.sidebar == 2 || (config.sidebar == 0 && pw >= 500);
@@ -1638,7 +1638,7 @@ public final class StudioScreen extends Screen {
 	}
 
 	private static final int[] MIN_CARD_COMPACT = {44, 54, 76};
-	private static final int[] MIN_CARD_COMFY = {56, 70, 96};
+	private static final int[] MIN_CARD_COMFY = {64, 78, 104};
 	/** Card names cut to the card width, made once per list and width instead of every frame. */
 	private List<Card> cardLinesFor;
 	private int cardLinesW, cardLinesN;
@@ -1699,7 +1699,7 @@ public final class StudioScreen extends Screen {
 			box(ctx, cx, y0, cx + cardW, y0 + cardH, fillColor, borderColor, lg);
 			if (st > 0.5f) box(ctx, cx - 1, y0 - 1, cx + cardW + 1, y0 + cardH + 1, 0, pal.glow(), lg);
 			round(ctx, cx + cp, y0 + cp, cx + cp + prev, y0 + cp + wellH, pal.well(), sm);
-			int img = Math.min(prev, wellH) - 8;
+			int img = pictureSize(Math.min(prev, wellH) - 8);
 			int imgX = cx + cp + (prev - img) / 2, imgY = y0 + cp + (wellH - img) / 2;
 			if (!drawPreview(ctx, card.imageKey, card.image, imgX, imgY, img)) {
 				if (previews.isLoading(card.imageKey)) drawLoading(ctx, cx + cp + prev / 2, y0 + cp + wellH / 2);
@@ -1976,6 +1976,14 @@ public final class StudioScreen extends Screen {
 		return s;
 	}
 
+	/**
+	 * A size for texture pictures that suits 16 px and 32 px packs alike: a multiple of 32, so both are scaled by a
+	 * whole number and come out equally big (16 px at 2x or 4x, 32 px at 1x or 2x).
+	 */
+	private static int pictureSize(int room) {
+		return room >= 64 ? room / 32 * 32 : room >= 32 ? 32 : Math.max(8, room);
+	}
+
 	/** Height one slider row takes. */
 	private int sliderStep() {
 		return compact ? 22 : 25;
@@ -2127,7 +2135,7 @@ public final class StudioScreen extends Screen {
 		String style = ready() ? styleOf(selected) : null;
 		int stageY = y;
 		y = drawStage(ctx, ix1, ix2, y, isEdited(selectedTarget));
-		int picture = Math.min(stageH - 14, 56);
+		int picture = pictureSize(stageH - 12);
 		int picX = ix1 + (iw - picture) / 2, picY = stageY + (stageH - 12 - picture) / 2;
 		boolean drawn = false;
 		if (ready() && style != null && index.get(style) != null) {
@@ -2255,7 +2263,7 @@ public final class StudioScreen extends Screen {
 		String style = ready() ? styleOf(key) : null;
 		PackSource src = style == null || index == null ? null : index.get(style);
 		// particles show at their chosen size (bigger than normal can't be shown bigger than the box)
-		int full = Math.min(stageH - 14, 56);
+		int full = pictureSize(stageH - 12);
 		int box = resizable ? Math.max(6, Math.round(full * Math.min(1f, size))) : full;
 		int bx = ix1 + iw / 2 - box / 2, by = stageY + (stageH - 12) / 2 - box / 2;
 		boolean drawn = false;
