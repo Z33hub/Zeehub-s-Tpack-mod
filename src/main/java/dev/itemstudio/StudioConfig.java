@@ -74,6 +74,14 @@ public final class StudioConfig {
 	public java.util.List<String> recent = new java.util.ArrayList<>();
 	public boolean sortZtoA = false;
 
+	// Where the menu was left, so it opens there next time
+	/** Category name (Category enum), null = Swords. */
+	public String lastCategory = null;
+	/** Item id of the item picked in that category. */
+	public String lastItem = null;
+	/** Picked part per part category (HUD, particles...): category name -> part key. */
+	public Map<String, String> lastParts = new TreeMap<>();
+
 	public static StudioConfig get() {
 		if (instance == null) {
 			instance = load();
@@ -102,6 +110,7 @@ public final class StudioConfig {
 					config.profiles = new java.util.LinkedHashMap<>(config.profiles);
 					config.profiles.values().removeIf(java.util.Objects::isNull);
 					if (config.activeProfile == null || config.activeProfile.isBlank()) config.activeProfile = "Main";
+					if (config.lastParts == null) config.lastParts = new TreeMap<>();
 					config.storeActive();
 					return config;
 				}

@@ -120,6 +120,8 @@ public final class StudioScreen extends Screen {
 	private Item selected;
 	/** The selected part in each texture-part category (HUD, particles). */
 	private final Map<Category, TexturePart> selectedPart = new HashMap<>();
+	/** Scroll the sidebar / item strip once so the restored category and item are in view. */
+	private boolean revealRail, revealTile;
 	private View view = View.FIRST_PERSON;
 	private Filter filter = Filter.ALL;
 	private boolean bulkMode;
@@ -155,6 +157,54 @@ public final class StudioScreen extends Screen {
 	public StudioScreen(Screen parent) {
 		super(Component.translatable("itemstudio.title"));
 		this.parent = parent;
+		restoreView();
+	}
+
+	/** Opens on the category, item and parts the menu was left on last time. */
+	private void restoreView() {
+		if (config.lastCategory != null) {
+			try {
+				category = Category.valueOf(config.lastCategory);
+			} catch (IllegalArgumentException ignored) {
+				// a category that no longer exists: keep the default
+			}
+		}
+		if (config.lastItem != null) {
+			Identifier id = Identifier.tryParse(config.lastItem);
+			if (id != null && BuiltInRegistries.ITEM.containsKey(id)) {
+				Item item = BuiltInRegistries.ITEM.getValue(id);
+				if (!category.items().contains(item)) {
+					// picked from a search: open the category it belongs to
+					for (Category c : Category.values()) {
+						if (c != Category.ALL && c.items().contains(item)) {
+							category = c;
+							break;
+						}
+					}
+				}
+				if (category.items().contains(item)) selected = item;
+			}
+		}
+		if (config.lastParts != null) {
+			config.lastParts.forEach((cat, key) -> {
+				TexturePart part = TexturePart.byKey(key);
+				for (Category c : Category.values()) {
+					if (c.name().equals(cat) && part != null && c.parts().contains(part)) selectedPart.put(c, part);
+				}
+			});
+		}
+		revealRail = true;
+		revealTile = true;
+	}
+
+	/** Saves the category, item and parts the menu is on, for next time. */
+	private void rememberView() {
+		config.lastCategory = category.name();
+		config.lastItem = selected == null ? null : BuiltInRegistries.ITEM.getKey(selected).toString();
+		Map<String, String> parts = new java.util.TreeMap<>();
+		selectedPart.forEach((c, part) -> parts.put(c.name(), part.key()));
+		config.lastParts = parts;
+		config.save();
 	}
 
 	// ------------------------------------------------------------------ setup
@@ -226,6 +276,7 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	public void removed() {
+		rememberView();
 		// The scan and pictures are kept for next time; only the open pack files are closed.
 		if (index != null) index.close();
 		index = null;
@@ -927,6 +978,11 @@ public final class StudioScreen extends Screen {
 			top += 10;
 		}
 		int content = cats.length * (rowH + 1);
+		if (revealRail) {
+			// first frame: centre the restored category if the list has to scroll
+			scroll.put("rail", Math.max(0, category.ordinal() * (rowH + 1) - (y2 - top - 4) / 2 + rowH / 2));
+			revealRail = false;
+		}
 		int off = scrollOf("rail", content, y2 - top - 4);
 		scrollAreas.add(new ScrollArea("rail", x1, top, x2, y2, Math.max(0, content - (y2 - top - 4))));
 
@@ -1000,6 +1056,19 @@ public final class StudioScreen extends Screen {
 		int shownRows = Math.min(rows, 2);
 		int areaH = shownRows * (tile + gap) - gap;
 		int content = rows * (tile + gap) - gap;
+		if (revealTile) {
+			// first frame: if the restored item is below the visible rows, scroll down to it
+			if (cur != null && !searching) {
+				for (int i = 0; i < items.size(); i++) {
+					if (items.get(i).key.equals(cur.key)) {
+						int row = i / cols;
+						if (row >= shownRows) scroll.put("items", (row - shownRows + 1) * (tile + gap));
+						break;
+					}
+				}
+			}
+			revealTile = false;
+		}
 		int off = scrollOf("items", content, areaH);
 		scrollAreas.add(new ScrollArea("items", x, y, x + w, y + areaH, Math.max(0, content - areaH)));
 		if (items.isEmpty()) {
