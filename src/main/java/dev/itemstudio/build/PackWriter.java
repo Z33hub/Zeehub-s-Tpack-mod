@@ -124,7 +124,10 @@ public final class PackWriter {
 	public static CompletableFuture<Void> enableAndReload(boolean hasFiles, boolean filesChanged) {
 		Minecraft client = Minecraft.getInstance();
 		PackRepository manager = client.getResourcePackRepository();
-		manager.reload();
+		// Rescanning opens every pack in the resourcepacks folder (slow with many packs, on the game thread).
+		// Only needed when the game doesn't know the generated pack yet (first Apply); its files are read fresh
+		// by the reload anyway.
+		if (hasFiles && !manager.getAvailableIds().contains(Resources.GENERATED_PACK_ID)) manager.reload();
 
 		List<String> enabled = new ArrayList<>(manager.getSelectedIds());
 		enabled.remove(Resources.GENERATED_PACK_ID);

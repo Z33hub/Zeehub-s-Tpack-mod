@@ -236,6 +236,7 @@ public final class StudioScreen extends Screen {
 
 	@Override
 	protected void init() {
+		closed = false;
 		if (index == null && loading == null) startScan("Loading packs...");
 		if (applied == null) applied = snapshot();
 		if (history.isEmpty()) pushHistory();
@@ -292,8 +293,16 @@ public final class StudioScreen extends Screen {
 	@Override
 	public void removed() {
 		rememberView();
-		// The scan and pictures are kept for next time; only the open pack files are closed.
-		if (index != null) index.close();
+		closed = true;
+		// Comparisons queued for cards that are no longer on screen: drop the ones that haven't started, so an
+		// Apply or the next visit doesn't wait behind them. They start again when needed.
+		WARM.values().forEach(job -> {
+			if (!job.isDone()) job.cancel(false);
+		});
+		WARM.values().removeIf(CompletableFuture::isCancelled);
+		// The scan and pictures are kept for next time; only the open pack files are closed. While an Apply
+		// is still building (closing the menu applies), they stay open until it is done.
+		if (index != null && !applying) index.close();
 		index = null;
 		loading = null;
 	}
@@ -650,6 +659,8 @@ public final class StudioScreen extends Screen {
 
 	/** An apply is building in the background / another one was asked for meanwhile. */
 	private boolean applying, applyAgain;
+	/** The menu was closed (removed); a finishing Apply then closes the pack files it kept open. */
+	private boolean closed;
 	/** Shown instead of "Applied" when the apply finishes (e.g. "Switched to Crystal"). */
 	private String applyNote;
 	private int applyNoteColor = GOOD;
@@ -672,7 +683,10 @@ public final class StudioScreen extends Screen {
 			applyAgain = true;
 			return;
 		}
-		PackIndex idx = indexNow();
+		// The pack scan may still be running: wait for it on the build thread, not the game thread.
+		CompletableFuture<PackIndex> scan = index != null ? CompletableFuture.completedFuture(index)
+			: loading != null ? loading : dev.itemstudio.pack.PackIndexCache.get();
+		java.util.concurrent.atomic.AtomicReference<PackIndex> used = new java.util.concurrent.atomic.AtomicReference<>();
 		StudioConfig choices = config.copyForBuild();
 		Map<String, String> applying_ = snapshot();
 		String note = applyNote;
@@ -681,11 +695,13 @@ public final class StudioScreen extends Screen {
 		applyNoteColor = GOOD;
 		applying = true;
 		setStatus("Applying...", MUTED);
-		CompletableFuture.supplyAsync(() -> {
+		scan.thenApplyAsync(idx -> {
+			used.set(idx);
 			PackBuilder builder = new PackBuilder(choices, idx).build();
 			return new Built(builder, PackWriter.writeChanges(builder.files()));
-		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((built, error) -> {
+		}, dev.itemstudio.Workers.BUILD).whenCompleteAsync((built, error) -> {
 			applying = false;
+			if (closed && used.get() != null && !applyAgain) used.get().close();
 			if (error != null || built.written() == PackWriter.Result.FAILED) {
 				if (error != null) ItemStudioClient.LOG.error("Could not apply", error);
 				setStatus("Could not write the pack - see the game log", WARN);
@@ -2952,7 +2968,7 @@ public final class StudioScreen extends Screen {
 		CompletableFuture.supplyAsync(() -> {
 			PackBuilder builder = new PackBuilder(choices, idx).build();
 			return builder.files().isEmpty() ? null : java.util.Optional.ofNullable(PackWriter.exportZip(builder.files(), name));
-		}, dev.itemstudio.Workers.BACKGROUND).whenCompleteAsync((zip, error) -> {
+		}, dev.itemstudio.Workers.BUILD).whenCompleteAsync((zip, error) -> {
 			if (error == null && zip == null) {
 				setStatus("Nothing to export - " + name + " doesn't change anything", WARN);
 			} else if (error != null || zip.isEmpty()) {
