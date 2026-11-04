@@ -61,6 +61,8 @@ public final class StudioConfig {
 	public int sidebar = 0;
 	/** Width of the panel on the right: 0 narrow, 1 normal, 2 wide. */
 	public int panelWidth = 1;
+	/** The menu's own GUI scale: 0 = same as the game, 1-4 = that GUI scale, 5 = the biggest that fits. */
+	public int menuScale = 0;
 
 	/** A saved set of choices: what is styled, size changes and particle sizes. */
 	public static final class Profile {
@@ -122,6 +124,7 @@ public final class StudioConfig {
 					config.corners = Math.max(0, Math.min(2, config.corners));
 					config.sidebar = Math.max(0, Math.min(2, config.sidebar));
 					config.panelWidth = Math.max(0, Math.min(2, config.panelWidth));
+					config.menuScale = Math.max(0, Math.min(5, config.menuScale));
 					config.cardSize = Math.max(0, Math.min(2, config.cardSize));
 					config.opacity = Float.isNaN(config.opacity) ? 0.78f : Math.max(0.4f, Math.min(1f, config.opacity));
 					config.storeActive();
@@ -249,6 +252,7 @@ public final class StudioConfig {
 		tooltips = true;
 		sidebar = 0;
 		panelWidth = 1;
+		menuScale = 0;
 	}
 
 	public String fontId() {
