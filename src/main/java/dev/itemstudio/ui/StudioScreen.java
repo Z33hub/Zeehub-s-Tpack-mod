@@ -237,6 +237,7 @@ public final class StudioScreen extends Screen {
 	@Override
 	protected void init() {
 		closed = false;
+		applyMenuScale();
 		if (index == null && loading == null) startScan("Loading packs...");
 		if (applied == null) applied = snapshot();
 		if (history.isEmpty()) pushHistory();
@@ -291,7 +292,36 @@ public final class StudioScreen extends Screen {
 	}
 
 	@Override
+	public void resize(int width, int height) {
+		super.resize(width, height);
+		applyMenuScale();
+	}
+
+	/**
+	 * The menu's own GUI scale (Settings > Layout > Menu size): while the menu is open the game's GUI scale is set to
+	 * it, and the game's own is put back when the menu closes. Everything (text boxes, mouse, clipping) then works
+	 * in the same units, and whole-number scales keep the text sharp.
+	 */
+	private void applyMenuScale() {
+		var window = minecraft.getWindow();
+		boolean unicode = minecraft.isEnforceUnicode();
+		int game = window.calculateScale(minecraft.options.guiScale().get(), unicode);
+		int target = config.menuScale <= 0 ? game : window.calculateScale(config.menuScale >= 5 ? 0 : config.menuScale, unicode);
+		if (window.getGuiScale() != target) window.setGuiScale(target);
+		width = window.getGuiScaledWidth();
+		height = window.getGuiScaledHeight();
+	}
+
+	/** Puts the game's own GUI scale back (the menu may have used its own). */
+	private void restoreGameScale() {
+		var window = minecraft.getWindow();
+		int game = window.calculateScale(minecraft.options.guiScale().get(), minecraft.isEnforceUnicode());
+		if (window.getGuiScale() != game) window.setGuiScale(game);
+	}
+
+	@Override
 	public void removed() {
+		restoreGameScale();
 		rememberView();
 		closed = true;
 		// Comparisons queued for cards that are no longer on screen: drop the ones that haven't started, so an
@@ -2772,6 +2802,19 @@ public final class StudioScreen extends Screen {
 	private int settingsLayout(GuiGraphicsExtractor ctx, int ix1, int ix2, int y, int mouseX, int mouseY) {
 		int iw = ix2 - ix1;
 		int sg = settingsGap();
+
+		y = section(ctx, "Menu size", null, ix1, ix2, y);
+		segmented(ctx, 0x762F, ix1, y, iw, ctl, new String[]{"Game", "1", "2", "3", "4", "Max"}, null, null, config.menuScale,
+			mouseX, mouseY, i -> {
+				if (config.menuScale == i) return;
+				config.menuScale = i;
+				config.save();
+				rebuildWidgets(); // lay the menu out again at the new scale
+			}, new String[]{"Same GUI scale as the game", "GUI scale 1: smallest", "GUI scale 2", "GUI scale 3",
+				"GUI scale 4", "The biggest that fits the window"});
+		y += ctl + 4;
+		y = smallWrapped(ctx, "The menu's own GUI scale. Your game's GUI scale doesn't change; sizes that don't fit the"
+			+ " window use the biggest that does.", ix1, y, iw, MUTED) + sg - 4;
 
 		y = section(ctx, "Spacing", null, ix1, ix2, y);
 		segmented(ctx, 0x7630, ix1, y, iw, ctl, new String[]{"Auto", "Compact", "Roomy"}, null, null, config.density, mouseX, mouseY, i -> {
