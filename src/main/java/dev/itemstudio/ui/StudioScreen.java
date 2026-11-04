@@ -831,6 +831,13 @@ public final class StudioScreen extends Screen {
 	/** What a pack changes for a target, shown under the pack name. */
 	private String kindOf(PackSource p, Target t) {
 		if (t.isPart()) {
+			if (t.part instanceof dev.itemstudio.pack.SkyElement) {
+				int layers = 0;
+				for (String f : index.partFiles(p, t.part)) {
+					if (dev.itemstudio.pack.SkyElement.isLayer(f)) layers++;
+				}
+				return Math.max(1, layers) + " sky layer" + (layers > 1 ? "s" : "");
+			}
 			int n = index.partFiles(p, t.part).size();
 			String textures = n + " texture" + (n == 1 ? "" : "s");
 			return index.partModelFiles(p, t.part).isEmpty() ? textures : textures + " + model";
@@ -843,6 +850,8 @@ public final class StudioScreen extends Screen {
 
 	/** Size of rendered 3D item pictures, in pixels (2x an inventory slot). */
 	private static final int MODEL_PREVIEW_SIZE = 32;
+	/** Skybox previews are shrunk to at most this many pixels wide or high. */
+	private static final int SKY_PREVIEW = 192;
 
 	/** Reads a file from a pack, or from the game's current resources when the pack doesn't have it. */
 	private static byte[] readWithBelow(PackSource p, String path) {
@@ -867,6 +876,9 @@ public final class StudioScreen extends Screen {
 		java.util.function.Function<String, byte[]> read = vanilla ? Resources::readVanilla : Resources::readBelow;
 		String main = mainFile(t);
 		byte[] flat = main == null ? null : read.apply(main);
+		if (t.isPart() && t.part instanceof dev.itemstudio.pack.SkyElement) {
+			return flat == null ? null : dev.itemstudio.pack.Png.shrink(flat, SKY_PREVIEW);
+		}
 		if (t.isPart()) {
 			Item block = partItem(t.part);
 			return block == null ? flat : itemPicture(ItemInfo.of(block), read, flat);
@@ -882,6 +894,11 @@ public final class StudioScreen extends Screen {
 		}
 		byte[] flat;
 		try {
+			if (t.part instanceof dev.itemstudio.pack.SkyElement) {
+				// skybox pictures can be thousands of pixels wide: shrink them here, off the game thread
+				String file = dev.itemstudio.pack.SkyElement.firstPicture(index.partFiles(p, t.part));
+				return file == null ? null : dev.itemstudio.pack.Png.shrink(p.read(file), SKY_PREVIEW);
+			}
 			if (p.has(t.part.preview())) flat = p.read(t.part.preview());
 			else {
 				List<String> files = index.partFiles(p, t.part);
@@ -929,6 +946,18 @@ public final class StudioScreen extends Screen {
 			t = itemTarget(partItem(t.part));
 		}
 		if (t.isPart()) {
+			if (t.part instanceof dev.itemstudio.pack.SkyElement sky) {
+				String[] icons = sky.iconFiles();
+				if (drawPreview(ctx, "skyicon|" + sky.key(), () -> {
+					for (String icon : icons) {
+						byte[] b = Resources.readBelow(icon);
+						if (b != null) return b;
+					}
+					return null;
+				}, x, y, size)) return;
+				text(ctx, t.part.label().substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
+				return;
+			}
 			String file = t.part.preview();
 			if (drawPreview(ctx, "below|" + file, () -> Resources.readBelow(file), x, y, size)) return;
 			text(ctx, t.part.label().substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
@@ -2347,6 +2376,16 @@ public final class StudioScreen extends Screen {
 			y = drawCrosshairEditor(ctx, ix1, ix2, y, top, bottom, mouseX, mouseY);
 		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
 			y = smallWrapped(ctx, "Changes placed blocks and the block item together.", ix1, y, iw, MUTED);
+		} else if (t.part instanceof dev.itemstudio.pack.SkyElement) {
+			String mod = dev.itemstudio.SkyMods.shownBy();
+			if (mod != null) {
+				y = smallWrapped(ctx, "Shown in game by " + mod + ". Copies the pack's whole skybox, every layer.", ix1, y, iw, MUTED);
+			} else if (dev.itemstudio.SkyMods.nuitWithoutInterop()) {
+				y = smallWrapped(ctx, "Nuit needs Nuit Interop to show these skies. Add it to your mods folder.", ix1, y, iw, WARN);
+			} else {
+				y = smallWrapped(ctx, "Custom skies need a sky mod to show in game: Skyboxify, or Nuit with Nuit Interop."
+					+ " None is installed, so your pick is saved but you won't see it yet.", ix1, y, iw, WARN);
+			}
 		} else {
 			y = smallWrapped(ctx, "These use the pack's textures as they are.", ix1, y, iw, MUTED);
 		}

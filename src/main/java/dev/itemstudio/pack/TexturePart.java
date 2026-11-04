@@ -47,6 +47,7 @@ public interface TexturePart {
 		list.addAll(List.of(ParticleElement.values()));
 		list.addAll(List.of(BlockElement.values()));
 		list.addAll(List.of(EffectElement.values()));
+		list.addAll(List.of(SkyElement.values()));
 		return list;
 	}
 
@@ -63,6 +64,7 @@ public interface TexturePart {
 	 * scan, so it first looks only at the folder: most files (item textures, models, sounds) are ruled out at once.
 	 */
 	static TexturePart of(String path) {
+		if (SkyElement.isSkyPath(path)) return SkyElement.of(path);
 		String base = "assets/minecraft/textures/";
 		if (!path.startsWith(base) || !path.endsWith(".png")) return null;
 		int dirEnd = path.indexOf('/', base.length());

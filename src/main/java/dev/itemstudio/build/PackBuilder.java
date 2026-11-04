@@ -124,6 +124,7 @@ public final class PackBuilder {
 				}
 			}
 			if (element.modelBlock() != null) copyBlockModel(element, source);
+			if (element instanceof dev.itemstudio.pack.SkyElement) copySkySources(source, index.partFiles(source, element));
 			return;
 		}
 		for (String file : index.partAllFiles(element)) {
@@ -182,6 +183,23 @@ public final class PackBuilder {
 		boolean changed = source.has(stateFile);
 		changed |= rewriteStateModels(state.getAsJsonObject(), copier::model);
 		if (changed) put(stateFile, state);
+	}
+
+	/** Sky layers can point at pictures outside their folder (source=...): copy those from the same pack too. */
+	private void copySkySources(PackSource source, List<String> files) {
+		for (String file : files) {
+			if (!file.endsWith(".properties")) continue;
+			try {
+				String text = new String(source.read(file), StandardCharsets.UTF_8);
+				for (String extra : dev.itemstudio.pack.SkyElement.sources(file, text)) {
+					if (out.containsKey(extra) || !source.has(extra)) continue;
+					out.put(extra, source.read(extra));
+					if (source.has(extra + ".mcmeta")) out.put(extra + ".mcmeta", source.read(extra + ".mcmeta"));
+				}
+			} catch (Exception e) {
+				problems.add(source.displayName() + ": could not read " + file);
+			}
+		}
 	}
 
 	/** "assets/minecraft/textures/block/cobweb.png" -> "minecraft:block/cobweb". */
