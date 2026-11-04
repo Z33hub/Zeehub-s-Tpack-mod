@@ -33,6 +33,7 @@ public enum Category {
 	HUD("HUD", Items.PAPER, p -> false),
 	PARTICLES("Particles", Items.BLAZE_POWDER, p -> false),
 	EFFECTS("Glint & effects", Items.EXPERIENCE_BOTTLE, p -> false),
+	SKY("Sky", Items.SUNFLOWER, p -> false),
 	ALL("All items", Items.CHEST, p -> true);
 
 	public final String label;
@@ -45,6 +46,10 @@ public enum Category {
 		this.icon = icon;
 		this.match = match;
 	}
+
+	/** Sun & moon, clouds and rain & snow live in the Sky tab, next to the custom skyboxes. */
+	private static final List<dev.itemstudio.pack.EffectElement> SKY_EFFECTS = List.of(dev.itemstudio.pack.EffectElement.SKY,
+		dev.itemstudio.pack.EffectElement.CLOUDS, dev.itemstudio.pack.EffectElement.WEATHER);
 
 	/** Texture parts shown instead of items (blocks, HUD, particles, effects); empty for item categories. */
 	private List<dev.itemstudio.pack.TexturePart> parts;
@@ -59,7 +64,13 @@ public enum Category {
 			case BLOCKS -> List.of(dev.itemstudio.pack.BlockElement.values());
 			case HUD -> List.of(dev.itemstudio.pack.HudElement.values());
 			case PARTICLES -> List.of(dev.itemstudio.pack.ParticleElement.values());
-			case EFFECTS -> List.of(dev.itemstudio.pack.EffectElement.values());
+			case EFFECTS -> java.util.Arrays.stream(dev.itemstudio.pack.EffectElement.values())
+				.filter(e -> !SKY_EFFECTS.contains(e)).map(e -> (dev.itemstudio.pack.TexturePart) e).toList();
+			case SKY -> {
+				List<dev.itemstudio.pack.TexturePart> list = new ArrayList<>(List.of(dev.itemstudio.pack.SkyElement.values()));
+				list.addAll(SKY_EFFECTS);
+				yield List.copyOf(list);
+			}
 			default -> List.of();
 		};
 	}

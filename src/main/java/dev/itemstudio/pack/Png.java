@@ -186,6 +186,43 @@ public final class Png {
 	}
 
 	/** Writes an 8-bit RGBA PNG. */
+	/**
+	 * A smaller copy (each new pixel is the average of the pixels it covers) when the picture is bigger than max on
+	 * either side; the same bytes otherwise. For huge pictures (skyboxes) shown as small menu previews.
+	 */
+	public static byte[] shrink(byte[] data, int max) {
+		Image img = decode(data);
+		if (img == null) return data;
+		int w = img.width(), h = img.height();
+		if (w <= max && h <= max) return data;
+		double s = Math.max(w, h) / (double) max;
+		int nw = Math.max(1, (int) Math.round(w / s)), nh = Math.max(1, (int) Math.round(h / s));
+		int[] out = new int[nw * nh];
+		for (int y = 0; y < nh; y++) {
+			int y0 = (int) (y * s), y1 = Math.max(y0 + 1, Math.min(h, (int) ((y + 1) * s)));
+			for (int x = 0; x < nw; x++) {
+				int x0 = (int) (x * s), x1 = Math.max(x0 + 1, Math.min(w, (int) ((x + 1) * s)));
+				long a = 0, r = 0, g = 0, b = 0;
+				int n = 0;
+				for (int yy = y0; yy < y1; yy++) {
+					for (int xx = x0; xx < x1; xx++) {
+						int c = img.argb()[yy * w + xx];
+						int ca = c >>> 24;
+						a += ca;
+						r += (long) ((c >> 16) & 0xFF) * ca;
+						g += (long) ((c >> 8) & 0xFF) * ca;
+						b += (long) (c & 0xFF) * ca;
+						n++;
+					}
+				}
+				int oa = (int) (a / n);
+				int or = a == 0 ? 0 : (int) (r / a), og = a == 0 ? 0 : (int) (g / a), ob = a == 0 ? 0 : (int) (b / a);
+				out[y * nw + x] = (oa << 24) | (or << 16) | (og << 8) | ob;
+			}
+		}
+		return encode(nw, nh, out);
+	}
+
 	public static byte[] encode(int width, int height, int[] argb) {
 		ByteArrayOutputStream raw = new ByteArrayOutputStream();
 		for (int y = 0; y < height; y++) {
