@@ -40,6 +40,27 @@ public final class PackWriter {
 
 	public enum Result { FAILED, UNCHANGED, CHANGED }
 
+	/** Files written or deleted since the last reload, as pack paths. Collected so the reload can be a quick one. */
+	private static final java.util.Set<String> changedSinceReload = new java.util.HashSet<>();
+	/** The pack's files after the last write. */
+	private static volatile java.util.Set<String> current = java.util.Set.of();
+	private static volatile boolean lastReloadQuick;
+
+	private static synchronized void noteChanged(String path) {
+		changedSinceReload.add(path);
+	}
+
+	private static synchronized java.util.Set<String> takeChanges() {
+		java.util.Set<String> copy = new java.util.HashSet<>(changedSinceReload);
+		changedSinceReload.clear();
+		return copy;
+	}
+
+	/** True when the last Apply only reloaded what changed (sounds, single textures). */
+	public static boolean lastReloadQuick() {
+		return lastReloadQuick;
+	}
+
 	/** Replaces the generated pack's files. Returns false if writing failed. */
 	public static boolean write(Map<String, byte[]> files) {
 		return writeChanges(files) != Result.FAILED;
@@ -56,6 +77,8 @@ public final class PackWriter {
 			if (files.isEmpty()) {
 				boolean existed = Files.exists(dir);
 				deleteTree(dir);
+				current = java.util.Set.of();
+				if (existed) noteChanged("pack.mcmeta");
 				return existed ? Result.CHANGED : Result.UNCHANGED;
 			}
 			Map<String, byte[]> all = new java.util.LinkedHashMap<>(files);
@@ -82,12 +105,15 @@ public final class PackWriter {
 				}
 				Files.createDirectories(target.getParent());
 				Files.write(target, bytes);
+				noteChanged(entry.getKey());
 				changed = true;
 			}
 			for (Path old : leftover) {
 				Files.deleteIfExists(old);
+				noteChanged(dir.normalize().relativize(old).toString().replace('\\', '/'));
 				changed = true;
 			}
+			current = java.util.Set.copyOf(all.keySet());
 			if (changed) removeEmptyFolders(dir);
 			return changed ? Result.CHANGED : Result.UNCHANGED;
 		} catch (IOException e) {
@@ -122,6 +148,8 @@ public final class PackWriter {
 
 	/** Same, but skips the (slow) reload when no file changed and the pack list is the same. */
 	public static CompletableFuture<Void> enableAndReload(boolean hasFiles, boolean filesChanged) {
+		java.util.Set<String> changes = takeChanges();
+		lastReloadQuick = false;
 		Minecraft client = Minecraft.getInstance();
 		PackRepository manager = client.getResourcePackRepository();
 		// Rescanning opens every pack in the resourcepacks folder (slow with many packs, on the game thread).
@@ -140,6 +168,13 @@ public final class PackWriter {
 		client.options.updateResourcePacks(manager); // saves options and reloads if the list changed
 		if (before.equals(client.options.resourcePacks)) {
 			if (!filesChanged) return CompletableFuture.completedFuture(null);
+			if (hasFiles && StudioConfig.get().fastApply) {
+				CompletableFuture<Void> quick = FastReload.start(changes, current);
+				if (quick != null) {
+					lastReloadQuick = true;
+					return quick;
+				}
+			}
 			return client.reloadResourcePacks();
 		}
 		// refreshResourcePacks already started a reload; wait for it by queueing behind it.
