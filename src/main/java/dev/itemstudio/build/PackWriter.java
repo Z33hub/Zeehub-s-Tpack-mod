@@ -175,7 +175,7 @@ public final class PackWriter {
 					return quick;
 				}
 			}
-			return client.reloadResources();
+			return FastReload.track(client.reloadResources());
 		}
 		// refreshResourcePacks already started a reload; wait for it by queueing behind it.
 		return CompletableFuture.completedFuture(null);

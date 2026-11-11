@@ -32,7 +32,16 @@ public final class FastReload {
 		"environment/rain", "environment/snow",
 		"entity/experience_orb");
 
+	/** The last full reload Item Studio started. */
+	private static volatile CompletableFuture<?> lastFull;
+
 	private FastReload() {
+	}
+
+	/** Remembers a full reload, so no quick one starts while it runs. */
+	static <T> CompletableFuture<T> track(CompletableFuture<T> full) {
+		lastFull = full;
+		return full;
 	}
 
 	/** What a quick reload would have to reload for these changed files, or null when they need a full one. */
@@ -67,6 +76,7 @@ public final class FastReload {
 		if (kinds == null) return null;
 		MinecraftClient client = MinecraftClient.getInstance();
 		if (client.getOverlay() != null) return null; // a reload is already running
+		if (lastFull != null && !lastFull.isDone()) return null;
 		// The game only sees new files of the pack in folders it saw at the last full reload.
 		String probe = null;
 		for (String f : files) {
@@ -90,7 +100,7 @@ public final class FastReload {
 						return;
 					}
 					ItemStudioClient.LOG.warn("Quick reload failed, doing a full one", error);
-					client.execute(() -> client.reloadResources().whenComplete((a, b) -> done.complete(null)));
+					client.execute(() -> track(client.reloadResources()).whenComplete((a, b) -> done.complete(null)));
 				});
 		} catch (Throwable t) {
 			ItemStudioClient.LOG.warn("Quick reload could not start, doing a full one", t);
