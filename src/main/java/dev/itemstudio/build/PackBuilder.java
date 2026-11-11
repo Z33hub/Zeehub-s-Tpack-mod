@@ -51,6 +51,8 @@ public final class PackBuilder {
 	/** Output: path inside the generated pack -> bytes. */
 	private final Map<String, byte[]> out = new LinkedHashMap<>();
 	private final List<String> problems = new ArrayList<>();
+	/** Sound events for Item Studio's sounds.json, by name (see addSoundEvents). */
+	private final JsonObject soundEvents = new JsonObject();
 
 	public PackBuilder(StudioConfig config, PackIndex index) {
 		this.config = config;
@@ -92,6 +94,7 @@ public final class PackBuilder {
 			out.put(CROSSHAIR_FILE, dev.itemstudio.pack.Png.encode(15, 15, px));
 			out.remove(CROSSHAIR_FILE + ".mcmeta");
 		}
+		if (soundEvents.size() > 0) put(dev.itemstudio.pack.SoundElement.SOUNDS_JSON, soundEvents);
 		return this;
 	}
 
@@ -125,6 +128,7 @@ public final class PackBuilder {
 			}
 			if (element.modelBlock() != null) copyBlockModel(element, source);
 			if (element instanceof dev.itemstudio.pack.SkyElement) copySkySources(source, index.partFiles(source, element));
+			if (element instanceof dev.itemstudio.pack.SoundElement sound) addSoundEvents(sound, source);
 			return;
 		}
 		for (String file : index.partAllFiles(element)) {
@@ -199,6 +203,43 @@ public final class PackBuilder {
 			} catch (Exception e) {
 				problems.add(source.displayName() + ": could not read " + file);
 			}
+		}
+	}
+
+	/**
+	 * Makes the group's sound events play what the chosen pack plays: the pack's own entries from its sounds.json
+	 * where it has them, otherwise the game's own entries, set to replace whatever a turned-on pack points them at.
+	 * Files from older packs under a name the game no longer plays (random/click) are also copied to today's name.
+	 */
+	private void addSoundEvents(dev.itemstudio.pack.SoundElement sound, PackSource source) {
+		for (String file : index.partFiles(source, sound)) {
+			String renamed = dev.itemstudio.pack.SoundElement.renamed(file);
+			if (renamed != null && !source.has(renamed) && out.containsKey(file)) out.put(renamed, out.get(file));
+		}
+		Map<String, JsonElement> own = Map.of();
+		if (!(source instanceof dev.itemstudio.pack.VanillaSource) && source.has(dev.itemstudio.pack.SoundElement.SOUNDS_JSON)) {
+			try {
+				JsonElement json = Resources.parse(source.read(dev.itemstudio.pack.SoundElement.SOUNDS_JSON));
+				if (json != null && json.isJsonObject()) own = sound.entriesIn(json.getAsJsonObject());
+			} catch (Exception e) {
+				problems.add(source.displayName() + ": could not read its sounds.json");
+			}
+		}
+		java.util.Set<String> covered = new java.util.HashSet<>();
+		for (Map.Entry<String, JsonElement> e : own.entrySet()) {
+			soundEvents.add(e.getKey(), e.getValue().deepCopy());
+			String event = e.getKey().toLowerCase(java.util.Locale.ROOT);
+			covered.add(event.startsWith("minecraft:") ? event.substring(10) : event);
+		}
+		JsonObject vanilla = dev.itemstudio.pack.SoundElement.vanillaList();
+		if (vanilla == null) return;
+		for (String event : sound.vanillaEvents()) {
+			if (covered.contains(event)) continue;
+			JsonElement entry = vanilla.get(event);
+			if (entry == null || !entry.isJsonObject()) continue;
+			JsonObject copy = entry.getAsJsonObject().deepCopy();
+			copy.addProperty("replace", true);
+			soundEvents.add(event, copy);
 		}
 	}
 

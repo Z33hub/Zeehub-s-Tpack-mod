@@ -30,7 +30,8 @@ public enum BlockElement implements TexturePart {
 	WOOL("Wool", "minecraft:white_wool", "block/*_wool"),
 	GLASS("Glass", "minecraft:glass", "block/glass", "block/glass_pane_top", "block/*_stained_glass",
 		"block/*_stained_glass_pane_top", "block/tinted_glass"),
-	WATER_LAVA("Water & lava", null, "block/water_*", "block/lava_*");
+	WATER_LAVA("Water & lava", null, "block/water_*", "block/lava_*"),
+	BREAKING("Breaking cracks", null, "block/destroy_stage_*");
 
 	public static final String KEY_PREFIX = "block:";
 
@@ -67,6 +68,7 @@ public enum BlockElement implements TexturePart {
 			case WATER_LAVA -> "block/water_still";
 			case WOOD -> "block/oak_planks";
 			case WOOL -> "block/white_wool";
+			case BREAKING -> "block/destroy_stage_7";
 			default -> first;
 		};
 		return "assets/minecraft/textures/" + name + ".png";

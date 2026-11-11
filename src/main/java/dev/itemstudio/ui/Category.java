@@ -34,6 +34,7 @@ public enum Category {
 	PARTICLES("Particles", Items.BLAZE_POWDER, p -> false),
 	EFFECTS("Glint & effects", Items.EXPERIENCE_BOTTLE, p -> false),
 	SKY("Sky", Items.SUNFLOWER, p -> false),
+	SOUNDS("Sounds", Items.NOTE_BLOCK, p -> false),
 	ALL("All items", Items.CHEST, p -> true);
 
 	public final String label;
@@ -71,6 +72,7 @@ public enum Category {
 				list.addAll(SKY_EFFECTS);
 				yield List.copyOf(list);
 			}
+			case SOUNDS -> List.of(dev.itemstudio.pack.SoundElement.values());
 			default -> List.of();
 		};
 	}

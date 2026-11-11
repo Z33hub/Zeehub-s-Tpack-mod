@@ -85,11 +85,47 @@ public final class PackIndex {
 				TexturePart part = TexturePart.of(lower);
 				if (part != null) parts.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
 			}
+			if (pack.has(SoundElement.SOUNDS_JSON)) addSoundListFiles(pack, parts);
 			parts.values().forEach(java.util.Collections::sort);
 			index.partFiles.put(pack.id(), parts);
 		}
 		index.gameParts = listGameParts();
 		return index;
+	}
+
+	/**
+	 * Sound files a pack's sounds.json plays for a sound group's events, on top of its files named like the game's
+	 * own: packs that bring their own file names (sounds/custom/hit.ogg) show up for that group too.
+	 */
+	private static void addSoundListFiles(FilePackSource pack, Map<TexturePart, List<String>> parts) {
+		try {
+			com.google.gson.JsonElement json = Resources.parse(pack.read(SoundElement.SOUNDS_JSON));
+			if (json == null || !json.isJsonObject()) return;
+			for (SoundElement group : SoundElement.values()) {
+				for (com.google.gson.JsonElement entry : group.entriesIn(json.getAsJsonObject()).values()) {
+					for (String file : SoundElement.filesOf(entry)) {
+						if (!pack.has(file)) continue;
+						List<String> list = parts.computeIfAbsent(group, k -> new ArrayList<>());
+						if (!list.contains(file)) list.add(file);
+					}
+				}
+			}
+		} catch (Exception e) {
+			ItemStudioClient.LOG.debug("Could not read the sound list of {}: {}", pack.displayName(), e.toString());
+		}
+	}
+
+	/** A pack's sounds.json entries for a sound group, as text ("" when it has none). */
+	public static String soundEntries(PackSource source, SoundElement group) {
+		if (source instanceof VanillaSource || !source.has(SoundElement.SOUNDS_JSON)) return "";
+		try {
+			com.google.gson.JsonElement json = Resources.parse(source.read(SoundElement.SOUNDS_JSON));
+			if (json == null || !json.isJsonObject()) return "";
+			Map<String, com.google.gson.JsonElement> entries = group.entriesIn(json.getAsJsonObject());
+			return entries.isEmpty() ? "" : entries.toString();
+		} catch (Exception e) {
+			return "";
+		}
 	}
 
 	/**
@@ -359,6 +395,10 @@ public final class PackIndex {
 				if (source.has(file + ".mcmeta")) digest.update(source.read(file + ".mcmeta"));
 				digest.update((byte) 1);
 			}
+			// a pack that points the game's sound events at other files doesn't sound the same as one that doesn't
+			if (element instanceof SoundElement sound) {
+				digest.update(soundEntries(source, sound).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			}
 			// a cobweb with an outline model doesn't look like the same texture without one
 			for (String file : partModelFiles(source, element)) {
 				digest.update(file.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -383,6 +423,7 @@ public final class PackIndex {
 		return hudSameAsBelowCache.computeIfAbsent(source.id() + "|" + element.key(), k -> {
 			List<String> files = partFiles(source, element);
 			if (files.isEmpty()) return false;
+			if (element instanceof SoundElement sound && !soundEntries(source, sound).isEmpty()) return false;
 			try {
 				for (String file : files) {
 					if (!java.util.Arrays.equals(source.read(file), Resources.readBelow(file))) return false;
@@ -451,6 +492,10 @@ public final class PackIndex {
 			String lower = path.toLowerCase();
 			TexturePart part = TexturePart.of(lower);
 			if (part != null) map.computeIfAbsent(part, k -> new ArrayList<>()).add(lower);
+		}
+		for (SoundElement group : SoundElement.values()) {
+			List<String> files = group.vanillaFiles();
+			if (!files.isEmpty()) map.put(group, new ArrayList<>(files));
 		}
 		return map;
 	}

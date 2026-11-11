@@ -32,6 +32,16 @@ public interface TexturePart {
 		return null;
 	}
 
+	/** An item drawn as this part's icon in lists, when the part has no picture of its own (sounds), or null. */
+	default String iconItem() {
+		return null;
+	}
+
+	/** Pictures to use as this part's icon, first one found wins, or null to use the preview file. */
+	default String[] iconFiles() {
+		return null;
+	}
+
 	/** True for particles, which can be made bigger or smaller. */
 	default boolean resizable() {
 		return this instanceof ParticleElement;
@@ -48,6 +58,7 @@ public interface TexturePart {
 		list.addAll(List.of(BlockElement.values()));
 		list.addAll(List.of(EffectElement.values()));
 		list.addAll(List.of(SkyElement.values()));
+		list.addAll(List.of(SoundElement.values()));
 		return list;
 	}
 
@@ -65,6 +76,7 @@ public interface TexturePart {
 	 */
 	static TexturePart of(String path) {
 		if (SkyElement.isSkyPath(path)) return SkyElement.of(path);
+		if (SoundElement.isSoundPath(path)) return SoundElement.of(path);
 		String base = "assets/minecraft/textures/";
 		if (!path.startsWith(base) || !path.endsWith(".png")) return null;
 		int dirEnd = path.indexOf('/', base.length());
