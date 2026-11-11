@@ -185,7 +185,6 @@ public final class Png {
 		}
 	}
 
-	/** Writes an 8-bit RGBA PNG. */
 	/**
 	 * A smaller copy (each new pixel is the average of the pixels it covers) when the picture is bigger than max on
 	 * either side; the same bytes otherwise. For huge pictures (skyboxes) shown as small menu previews.
@@ -223,6 +222,38 @@ public final class Png {
 		return encode(nw, nh, out);
 	}
 
+	/**
+	 * Block-breaking cracks drawn over a block texture the way the game draws them on a block being mined: every crack
+	 * pixel that isn't see-through doubles the block's color times its own, so mid grey leaves the block alone and
+	 * darker pixels crack it. The first frame of each picture is used, scaled to the bigger of the two. block may be
+	 * null (plain grey is used). Returns crack unchanged when it can't be read.
+	 */
+	public static byte[] cracks(byte[] crack, byte[] block) {
+		Image c = decode(crack);
+		if (c == null || c.width() == 0) return crack;
+		Image b = decode(block);
+		int cs = Math.min(c.width(), c.height());
+		int bs = b == null ? 1 : Math.min(b.width(), b.height());
+		int n = Math.max(cs, bs);
+		int[] out = new int[n * n];
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				int base = b == null ? 0xFF8B8B8B : b.get(x * bs / n, y * bs / n) | 0xFF000000;
+				int top = c.get(x * cs / n, y * cs / n);
+				if ((top >>> 24) < 26) {
+					out[y * n + x] = base;
+					continue;
+				}
+				int r = Math.min(255, 2 * ((top >> 16) & 255) * ((base >> 16) & 255) / 255);
+				int g = Math.min(255, 2 * ((top >> 8) & 255) * ((base >> 8) & 255) / 255);
+				int bl = Math.min(255, 2 * (top & 255) * (base & 255) / 255);
+				out[y * n + x] = 0xFF000000 | (r << 16) | (g << 8) | bl;
+			}
+		}
+		return encode(n, n, out);
+	}
+
+	/** Writes an 8-bit RGBA PNG. */
 	public static byte[] encode(int width, int height, int[] argb) {
 		ByteArrayOutputStream raw = new ByteArrayOutputStream();
 		for (int y = 0; y < height; y++) {

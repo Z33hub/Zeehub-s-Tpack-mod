@@ -15,6 +15,7 @@ import dev.itemstudio.pack.PackSource;
 import dev.itemstudio.pack.Refs;
 import dev.itemstudio.pack.Resources;
 import dev.itemstudio.pack.VanillaSource;
+import dev.itemstudio.pack.SoundElement;
 import net.minecraft.client.gl.RenderPipelines;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
@@ -322,6 +323,7 @@ public final class StudioScreen extends Screen {
 	@Override
 	public void removed() {
 		restoreGameScale();
+		SoundPreview.stop();
 		rememberView();
 		closed = true;
 		// Comparisons queued for cards that are no longer on screen: drop the ones that haven't started, so an
@@ -797,6 +799,18 @@ public final class StudioScreen extends Screen {
 		return item == Items.AIR ? null : item;
 	}
 
+	private final Map<TexturePart, Item> iconItems = new java.util.concurrent.ConcurrentHashMap<>();
+
+	/** The item drawn as a part's icon when it has no picture of its own (sounds), or null. */
+	private Item iconItem(TexturePart part) {
+		Item item = iconItems.computeIfAbsent(part, p -> {
+			Identifier id = p.iconItem() == null ? null : Identifier.tryParse(p.iconItem());
+			if (id == null || !Registries.ITEM.containsId(id)) return Items.AIR;
+			return Registries.ITEM.get(id);
+		});
+		return item == Items.AIR ? null : item;
+	}
+
 	private boolean partMode() {
 		return !category.parts().isEmpty() && query.isEmpty();
 	}
@@ -868,6 +882,13 @@ public final class StudioScreen extends Screen {
 				}
 				return Math.max(1, layers) + " sky layer" + (layers > 1 ? "s" : "");
 			}
+			if (t.part instanceof SoundElement) {
+				int n = 0;
+				for (String f : index.partFiles(p, t.part)) {
+					if (f.endsWith(".ogg")) n++;
+				}
+				return n + " sound" + (n == 1 ? "" : "s");
+			}
 			int n = index.partFiles(p, t.part).size();
 			String textures = n + " texture" + (n == 1 ? "" : "s");
 			return index.partModelFiles(p, t.part).isEmpty() ? textures : textures + " + model";
@@ -903,6 +924,7 @@ public final class StudioScreen extends Screen {
 
 	/** Picture for the Default (what the game shows now) or Vanilla card. */
 	private byte[] basePreview(Target t, boolean vanilla) {
+		if (isSound(t)) return null; // sounds have waveforms instead (firstSound)
 		java.util.function.Function<String, byte[]> read = vanilla ? Resources::readVanilla : Resources::readBelow;
 		String main = mainFile(t);
 		byte[] flat = main == null ? null : read.apply(main);
@@ -911,7 +933,7 @@ public final class StudioScreen extends Screen {
 		}
 		if (t.isPart()) {
 			Item block = partItem(t.part);
-			return block == null ? flat : itemPicture(ItemInfo.of(block), read, flat);
+			return block == null ? onBlock(t.part, flat) : itemPicture(ItemInfo.of(block), read, flat);
 		}
 		return itemPicture(ItemInfo.of(t.item), read, flat);
 	}
@@ -922,6 +944,7 @@ public final class StudioScreen extends Screen {
 			ItemInfo info = ItemInfo.of(t.item);
 			return itemPicture(info, path -> readWithBelow(p, path), previewBytes(p, info));
 		}
+		if (isSound(t)) return null; // sounds have waveforms instead (firstSound)
 		byte[] flat;
 		try {
 			if (t.part instanceof dev.itemstudio.pack.SkyElement) {
@@ -932,13 +955,98 @@ public final class StudioScreen extends Screen {
 			if (p.has(t.part.preview())) flat = p.read(t.part.preview());
 			else {
 				List<String> files = index.partFiles(p, t.part);
-				flat = files.isEmpty() ? null : p.read(files.get(0));
+				// cracks: the last stage has the most of them
+				int pick = t.part == dev.itemstudio.pack.BlockElement.BREAKING ? files.size() - 1 : 0;
+				flat = files.isEmpty() ? null : p.read(files.get(pick));
 			}
 		} catch (Exception e) {
 			flat = null;
 		}
 		Item block = partItem(t.part);
-		return block == null ? flat : itemPicture(ItemInfo.of(block), path -> readWithBelow(p, path), flat);
+		return block == null ? onBlock(t.part, flat) : itemPicture(ItemInfo.of(block), path -> readWithBelow(p, path), flat);
+	}
+
+	private static final String STONE = "assets/minecraft/textures/block/stone.png";
+
+	/** Breaking cracks are dark and see-through: show them on stone, like on a block being mined. */
+	private static byte[] onBlock(TexturePart part, byte[] flat) {
+		if (part != dev.itemstudio.pack.BlockElement.BREAKING || flat == null) return flat;
+		return dev.itemstudio.pack.Png.cracks(flat, Resources.readBelow(STONE));
+	}
+
+	// ------------------------------------------------------------------ sounds
+
+	private static boolean isSound(Target t) {
+		return t.isPart() && t.part instanceof SoundElement;
+	}
+
+	/**
+	 * The sound files a choice has for a sound group, the group's own sound first. src null means what the game
+	 * plays now: the game's own file names, read through the turned-on packs.
+	 */
+	private List<String> soundFiles(PackSource src, TexturePart part) {
+		SoundElement sound = (SoundElement) part;
+		if (src == null || src instanceof VanillaSource || index == null) return sound.vanillaFiles();
+		List<String> files = new ArrayList<>();
+		for (String f : index.partFiles(src, part)) {
+			if (f.endsWith(".ogg")) files.add(f);
+		}
+		if (files.remove(part.preview())) files.add(0, part.preview());
+		return files;
+	}
+
+	/** One sound file of a choice: from the pack, from vanilla, or what the game plays now (src null). */
+	private static byte[] soundBytes(PackSource src, String file) {
+		if (src == null) return Resources.readBelow(file);
+		if (src instanceof VanillaSource) return Resources.readVanilla(file);
+		try {
+			return src.read(file);
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	/** The sound a choice's card shows and plays first. */
+	private byte[] firstSound(PackSource src, TexturePart part) {
+		List<String> files = soundFiles(src, part);
+		return soundBytes(src, files.isEmpty() ? part.preview() : files.get(0));
+	}
+
+	/** What isPlaying and the waveforms call a choice of a sound group. */
+	private static String soundKey(PackSource src, Target t) {
+		return (src == null ? "below" : src.id()) + "|" + t.key;
+	}
+
+	/** Plays a choice's sound; playing it again plays its next file, so every hit sound of a pack can be heard. */
+	private void playSound(PackSource src, Target t) {
+		List<String> files = soundFiles(src, t.part);
+		String key = soundKey(src, t);
+		String file = files.isEmpty() ? t.part.preview() : files.get(SoundPreview.nextTurn(key, files.size()));
+		SoundPreview.play(key, () -> soundBytes(src, file));
+	}
+
+	/** A sound's waveform as bars in a size x size box. False until it is worked out, and when it can't be read. */
+	private boolean drawWave(DrawContext ctx, String key, Supplier<byte[]> ogg, int x, int y, int size, int color) {
+		float[] bars = SoundPreview.wave(waveKey(key), ogg);
+		if (bars == null) return false;
+		int n = Math.max(1, Math.min(bars.length, size / 2));
+		int slot = Math.max(1, size / n);
+		int barW = slot > 2 ? slot - 1 : 1;
+		int x0 = x + (size - n * slot) / 2;
+		int mid = y + size / 2;
+		for (int i = 0; i < n; i++) {
+			float v = 0;
+			int from = i * bars.length / n, to = Math.max(from + 1, (i + 1) * bars.length / n);
+			for (int j = from; j < to; j++) v = Math.max(v, bars[j]);
+			int h = Math.max(1, Math.round(v * size * 0.8f));
+			int top = mid - h / 2;
+			fill(ctx, x0 + i * slot, top, x0 + i * slot + barW, top + h, color);
+		}
+		return true;
+	}
+
+	private static String waveKey(String key) {
+		return dev.itemstudio.pack.PackIndexCache.generation() + "|" + key;
 	}
 
 	private String mainFile(Target t) {
@@ -974,11 +1082,13 @@ public final class StudioScreen extends Screen {
 	private void drawTargetIcon(DrawContext ctx, Target t, int x, int y, int size) {
 		if (t.isPart() && partItem(t.part) != null) {
 			t = itemTarget(partItem(t.part));
+		} else if (t.isPart() && iconItem(t.part) != null) {
+			t = itemTarget(iconItem(t.part));
 		}
 		if (t.isPart()) {
-			if (t.part instanceof dev.itemstudio.pack.SkyElement sky) {
-				String[] icons = sky.iconFiles();
-				if (drawPreview(ctx, "skyicon|" + sky.key(), () -> {
+			String[] icons = t.part.iconFiles();
+			if (icons != null) {
+				if (drawPreview(ctx, "icon|" + t.part.key(), () -> {
 					for (String icon : icons) {
 						byte[] b = Resources.readBelow(icon);
 						if (b != null) return b;
@@ -989,7 +1099,8 @@ public final class StudioScreen extends Screen {
 				return;
 			}
 			String file = t.part.preview();
-			if (drawPreview(ctx, "below|" + file, () -> Resources.readBelow(file), x, y, size)) return;
+			TexturePart part = t.part;
+			if (drawPreview(ctx, "below|" + file, () -> onBlock(part, Resources.readBelow(file)), x, y, size)) return;
 			text(ctx, t.part.label().substring(0, 1), x + size / 2 - 3, y + size / 2 - 4, TEXT2);
 			return;
 		}
@@ -1135,6 +1246,7 @@ public final class StudioScreen extends Screen {
 		int generation = dev.itemstudio.pack.PackIndexCache.generation();
 		if (generation != previewGeneration || previews.size() > 3000) {
 			previews.clear();
+			SoundPreview.clearWaves();
 			previewGeneration = generation;
 		}
 		ready();
@@ -1398,7 +1510,8 @@ public final class StudioScreen extends Screen {
 			float t = anim.fade(Anim.key(0x7101, i), hover && !active, 16f);
 			if (t > 0.01f) round(ctx, bx1, y, bx2, y + railRow, Anim.mix(0, pal.surface(), t), shapeSm());
 			int iconX = railFull ? bx1 + 5 : x1 + (railW - 1 - 16) / 2;
-			drawTargetIcon(ctx, !cat.parts().isEmpty() ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), iconX, y + (railRow - 16) / 2, 16);
+			boolean partIcon = !cat.parts().isEmpty() && cat != Category.SOUNDS;
+			drawTargetIcon(ctx, partIcon ? partTarget(cat.parts().get(0)) : itemTarget(cat.icon), iconX, y + (railRow - 16) / 2, 16);
 			boolean edited = categoryEdited[i] && cat != Category.ALL;
 			boolean cut = false;
 			if (railFull) {
@@ -1722,6 +1835,7 @@ public final class StudioScreen extends Screen {
 
 	private void drawCardGrid(DrawContext ctx, Target t, List<Card> cards, List<FilePackSource> packs, String current,
 	                          int x, int top, int w, int bottom, int mouseX, int mouseY) {
+		boolean soundCards = isSound(t);
 		int cgap = gap;
 		int minCard = (compact ? MIN_CARD_COMPACT : MIN_CARD_COMFY)[Math.max(0, Math.min(2, config.cardSize))];
 		int cols = Math.max(2, (w + cgap) / (minCard + cgap));
@@ -1776,8 +1890,14 @@ public final class StudioScreen extends Screen {
 			round(ctx, cx + cp, y0 + cp, cx + cp + prev, y0 + cp + wellH, pal.well(), sm);
 			int img = pictureSize(Math.min(prev, wellH) - 8);
 			int imgX = cx + cp + (prev - img) / 2, imgY = y0 + cp + (wellH - img) / 2;
-			if (!drawPreview(ctx, card.imageKey, card.image, imgX, imgY, img)) {
-				if (previews.isLoading(card.imageKey)) drawLoading(ctx, cx + cp + prev / 2, y0 + cp + wellH / 2);
+			PackSource cardSource = soundCards && card.sourceId != null && index != null ? index.get(card.sourceId) : null;
+			boolean playing = soundCards && SoundPreview.isPlaying(soundKey(cardSource, t));
+			boolean pictured = soundCards
+				? drawWave(ctx, card.imageKey, card.image, imgX, imgY, img, playing ? WHITE : pal.accent())
+				: drawPreview(ctx, card.imageKey, card.image, imgX, imgY, img);
+			if (!pictured) {
+				boolean loading = soundCards ? SoundPreview.waveLoading(waveKey(card.imageKey)) : previews.isLoading(card.imageKey);
+				if (loading) drawLoading(ctx, cx + cp + prev / 2, y0 + cp + wellH / 2);
 				else drawTargetIcon(ctx, t, imgX, imgY, img);
 			}
 			// name on up to two lines, then the kind of change
@@ -1797,6 +1917,7 @@ public final class StudioScreen extends Screen {
 			final boolean alreadyOn = on;
 			Runnable favToggle = () -> toggleFavorite(ids);
 			addHit(cx, cy, cx + cardW, cy + cardH, top, bottom, () -> {
+				if (soundCards) playSound(cardSource, t);
 				if (alreadyOn) return;
 				setStyle(t.key, sourceId);
 				changed(true);
@@ -1807,6 +1928,15 @@ public final class StudioScreen extends Screen {
 				icon(ctx, Icons.STAR, sx, sy, fav ? GOLD : starHover ? WHITE : 0xB0FFFFFF);
 				addHit(sx - 2, sy - 2, sx + 11, sy + 11, top, bottom, favToggle, favToggle,
 					fav ? "Remove from favorites" : "Add to favorites");
+			}
+			if (soundCards && (hover || playing)) {
+				// listen without picking it
+				int pb = 13;
+				int px = cx + cp + prev - pb - 3, py = y0 + cp + wellH - pb - 3;
+				boolean playHover = inside(mouseX, mouseY, px, py, px + pb, py + pb);
+				round(ctx, px, py, px + pb, py + pb, playHover ? pal.strongHover() : pal.strong(), shapePill(pb));
+				icon(ctx, Icons.PLAY, px + (pb - Icons.PLAY.w) / 2 + 1, py + (pb - Icons.PLAY.h) / 2, WHITE);
+				addHit(px, py, px + pb, py + pb, top, bottom, () -> playSound(cardSource, t), "Play without picking it");
 			}
 		}
 		int hy = top + rows * (cardH + cgap) - off + 2;
@@ -1834,15 +1964,19 @@ public final class StudioScreen extends Screen {
 		}
 
 		List<Card> cards = new ArrayList<>();
+		boolean sound = isSound(t);
+		String same = sound ? "Same sound" : "Same look";
 		boolean showFixed = styleQuery.isEmpty() && filter == Filter.ALL;
 		if (showFixed) {
-			cards.add(new Card(null, List.of(), "Default", "What the game shows now",
-				"Don't change this" + (likeDefault.isEmpty() ? "" : ". Same look as: " + names(likeDefault)),
-				() -> basePreview(t, false), "below|" + t.key));
+			cards.add(new Card(null, List.of(), "Default", sound ? "What the game plays now" : "What the game shows now",
+				"Don't change this" + (likeDefault.isEmpty() ? "" : ". " + same + " as: " + names(likeDefault)),
+				sound ? () -> firstSound(null, t.part) : () -> basePreview(t, false), "below|" + t.key));
 			if (!belowIsVanilla(t) || VanillaSource.ID.equals(current)) {
-				cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla", "Normal Minecraft look",
-					"The normal Minecraft look, even if another pack changes it",
-					() -> basePreview(t, true), "vanilla|" + t.key));
+				cards.add(new Card(VanillaSource.ID, List.of(VanillaSource.ID), "Vanilla",
+					sound ? "Normal Minecraft sound" : "Normal Minecraft look",
+					sound ? "The normal Minecraft sound, even if another pack changes it"
+						: "The normal Minecraft look, even if another pack changes it",
+					sound ? () -> firstSound(index.vanilla(), t.part) : () -> basePreview(t, true), "vanilla|" + t.key));
 			}
 		}
 		for (List<FilePackSource> group : arrange(new ArrayList<>(groups.values()), g -> g)) {
@@ -1853,10 +1987,10 @@ public final class StudioScreen extends Screen {
 				if (pack.id().equals(current)) shown = pack;
 			}
 			final FilePackSource preview = shown;
-			String sub = group.size() > 1 ? "Same look in " + group.size() + " packs" : kindOf(shown, t);
-			String tip = group.size() == 1 ? shown.displayName() : "Same look in: " + names(group);
+			String sub = group.size() > 1 ? same + " in " + group.size() + " packs" : kindOf(shown, t);
+			String tip = group.size() == 1 ? shown.displayName() : same + " in: " + names(group);
 			cards.add(new Card(shown.id(), ids, shown.displayName(), sub, tip + " - right-click to favorite",
-				() -> previewOf(preview, t), shown.id() + "|" + t.key));
+				sound ? () -> firstSound(preview, t.part) : () -> previewOf(preview, t), shown.id() + "|" + t.key));
 		}
 		return cards;
 	}
@@ -2342,7 +2476,14 @@ public final class StudioScreen extends Screen {
 		int box = resizable ? Math.max(6, Math.round(full * Math.min(1f, size))) : full;
 		int bx = ix1 + iw / 2 - box / 2, by = stageY + (stageH - 12) / 2 - box / 2;
 		boolean drawn = false;
-		if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR && config.crosshair != null) {
+		if (isSound(t)) {
+			int color = SoundPreview.isPlaying(soundKey(src, t)) ? WHITE : pal.accent();
+			drawn = drawWave(ctx, soundKey(src, t), () -> firstSound(src, t.part), bx, by, box, color);
+			if (!drawn && SoundPreview.waveLoading(waveKey(soundKey(src, t)))) {
+				drawLoading(ctx, bx + box / 2, by + box / 2);
+				drawn = true;
+			}
+		} else if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR && config.crosshair != null) {
 			String drawnCross = config.crosshair;
 			drawn = drawPreview(ctx, "cross|" + drawnCross, () -> crosshairPng(drawnCross), bx, by, box);
 		} else if (t.part.heightAdjustable() && config.partSize.containsKey(key)) {
@@ -2404,6 +2545,8 @@ public final class StudioScreen extends Screen {
 				+ " lower too, because the game uses the same picture.", ix1, y + 2, iw, MUTED);
 		} else if (t.part == dev.itemstudio.pack.HudElement.CROSSHAIR) {
 			y = drawCrosshairEditor(ctx, ix1, ix2, y, top, bottom, mouseX, mouseY);
+		} else if (t.part == dev.itemstudio.pack.BlockElement.BREAKING) {
+			y = smallWrapped(ctx, "The cracks on a block while you mine it. Shown here on stone.", ix1, y, iw, MUTED);
 		} else if (t.part instanceof dev.itemstudio.pack.BlockElement) {
 			y = smallWrapped(ctx, "Changes placed blocks and the block item together.", ix1, y, iw, MUTED);
 		} else if (t.part instanceof dev.itemstudio.pack.SkyElement) {
@@ -2416,6 +2559,14 @@ public final class StudioScreen extends Screen {
 				y = smallWrapped(ctx, "Custom skies need a sky mod to show in game: Skyboxify, or Nuit with Nuit Interop."
 					+ " None is installed, so your pick is saved but you won't see it yet.", ix1, y, iw, WARN);
 			}
+		} else if (t.part instanceof SoundElement sound) {
+			int rh = ctl - 2;
+			PackSource playFrom = src;
+			button(ctx, ix1, y, iw, rh, "Play", Icons.PLAY, BTN_NORMAL, mouseX, mouseY, () -> playSound(playFrom, t),
+				"Hear the picked sound. Press again for its next one");
+			y += rh + 6;
+			if (sound.note() != null) y = smallWrapped(ctx, sound.note(), ix1, y, iw, MUTED) + 2;
+			y = smallWrapped(ctx, "Click a card to hear it and pick it, or its play button to only hear it.", ix1, y, iw, MUTED);
 		} else {
 			y = smallWrapped(ctx, "These use the pack's textures as they are.", ix1, y, iw, MUTED);
 		}

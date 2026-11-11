@@ -61,6 +61,7 @@ public enum SkyElement implements TexturePart {
 	 * Small game textures to use as this skybox's icon in the menu (sun, netherrack, End sky), first one that
 	 * exists. Newer game versions moved the sun and moon into environment/celestial/.
 	 */
+	@Override
 	public String[] iconFiles() {
 		return iconFiles.clone();
 	}
