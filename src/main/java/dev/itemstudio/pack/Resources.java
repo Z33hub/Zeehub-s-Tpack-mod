@@ -50,6 +50,23 @@ public final class Resources {
 		return null;
 	}
 
+	/**
+	 * True when the game reads this file from Item Studio's pack. Files the game reads are listed per folder name
+	 * (namespace) when resources load, so this also says whether a new file in that folder would be seen without a
+	 * full reload.
+	 */
+	public static boolean fromGenerated(String path) {
+		Identifier id = toId(path);
+		if (id == null) return false;
+		try {
+			for (Resource resource : MinecraftClient.getInstance().getResourceManager().getAllResources(id)) {
+				if (isGenerated(resource)) return true;
+			}
+		} catch (Exception ignored) {
+		}
+		return false;
+	}
+
 	/** The file from the game's own built-in assets only. */
 	public static byte[] readVanilla(String path) {
 		Identifier id = toId(path);

@@ -57,6 +57,8 @@ public final class StudioConfig {
 	public boolean animations = true;
 	/** Tooltips when the mouse rests on something. */
 	public boolean tooltips = true;
+	/** Apply sounds and single textures (glint, overlays, rain) without a full resource reload. */
+	public boolean fastApply = true;
 	/** Category list on the left: 0 auto (names when there is room), 1 icons only, 2 always with names. */
 	public int sidebar = 0;
 	/** Width of the panel on the right: 0 narrow, 1 normal, 2 wide. */

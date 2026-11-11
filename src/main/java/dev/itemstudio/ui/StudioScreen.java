@@ -750,6 +750,9 @@ public final class StudioScreen extends Screen {
 					setStatus("Applied with " + builder.problems().size() + " problem(s): " + builder.problems().get(0), WARN);
 				}
 				PackWriter.enableAndReload(!builder.files().isEmpty(), built.written() == PackWriter.Result.CHANGED);
+				if (PackWriter.lastReloadQuick() && config.enabled && builder.problems().isEmpty() && note == null) {
+					setStatus("Applied (quick reload)", GOOD);
+				}
 			}
 			if (applyAgain) {
 				applyAgain = false;
@@ -3013,6 +3016,11 @@ public final class StudioScreen extends Screen {
 			config.checkUpdates = !config.checkUpdates;
 			config.save();
 		}, "Look for a newer Item Studio on GitHub once per game session");
+		y = switchRow(ctx, "Fast apply", "Sounds, glint, overlays and rain without the loading screen", config.fastApply, ix1, ix2, y,
+			mouseX, mouseY, () -> {
+				config.fastApply = !config.fastApply;
+				config.save();
+			}, "Items, blocks, HUD and particles still use the normal reload. Turn off if something looks wrong after Apply");
 		y = switchRow(ctx, "Tooltips", "Hints when the mouse rests on something", config.tooltips, ix1, ix2, y, mouseX, mouseY, () -> {
 			config.tooltips = !config.tooltips;
 			config.save();
